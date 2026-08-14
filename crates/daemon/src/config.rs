@@ -49,10 +49,9 @@ impl fmt::Display for DaemonConfigError {
         match self {
             Self::Read(error) => write!(formatter, "could not read daemon configuration: {error}"),
             Self::Parse(error) => write!(formatter, "invalid daemon configuration: {error}"),
-            Self::InvalidRuntimeSocket => write!(
-                formatter,
-                "runtime_socket must be a non-empty relative path without parent traversal"
-            ),
+            Self::InvalidRuntimeSocket => {
+                write!(formatter, "runtime_socket must be beankey/daemon.sock")
+            }
             Self::UnsupportedInferenceProfile(profile) => write!(
                 formatter,
                 "unsupported inference profile: context={}, batch={}, microbatch={}, flash_attention={}",
@@ -88,9 +87,8 @@ impl DaemonConfig {
     }
 
     fn validate(&self) -> Result<(), DaemonConfigError> {
-        let mut components = self.runtime_socket.components();
-        if self.runtime_socket.as_os_str().is_empty()
-            || components.any(|component| {
+        if self.runtime_socket != Path::new("beankey/daemon.sock")
+            || self.runtime_socket.components().any(|component| {
                 matches!(
                     component,
                     Component::Prefix(_) | Component::RootDir | Component::ParentDir

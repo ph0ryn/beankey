@@ -52,9 +52,11 @@ version = "0.1.0"
 dependencies = [
  "beankey-converter",
  "beankey-llama",
+ "libc",
  "prost",
  "prost-build",
  "serde",
+ "tempfile",
  "toml",
 ]
 
@@ -891,6 +893,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
+ "getrandom",
  "once_cell",
  "rustix",
  "windows-sys",

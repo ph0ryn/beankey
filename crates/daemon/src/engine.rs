@@ -177,6 +177,10 @@ impl Engine {
         }
     }
 
+    pub fn remove_session(&mut self, session_id: &str) {
+        self.sessions.remove(session_id);
+    }
+
     fn handle_session_request(
         &mut self,
         request_id: u64,

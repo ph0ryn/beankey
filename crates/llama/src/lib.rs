@@ -76,6 +76,10 @@ pub struct LlamaContext {
     vocabulary_size: usize,
 }
 
+// SAFETY: LlamaContext uniquely owns its native handle. Moving that ownership to another thread is
+// safe; its mutable inference methods still require exclusive Rust access.
+unsafe impl Send for LlamaContext {}
+
 impl LlamaContext {
     pub fn load(
         path: impl AsRef<Path>,

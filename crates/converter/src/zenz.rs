@@ -240,7 +240,7 @@ impl fmt::Display for ZenzInferenceError {
 
 impl Error for ZenzInferenceError {}
 
-pub trait ZenzLanguageModel {
+pub trait ZenzLanguageModel: Send {
     fn vocabulary_size(&self) -> usize;
     fn eos_token(&self) -> i32;
     fn tokenize(&mut self, text: &str, add_special: bool) -> Result<Vec<i32>, ZenzInferenceError>;

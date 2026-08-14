@@ -6,6 +6,7 @@ use prost::Message;
 
 mod config;
 mod engine;
+mod server;
 mod zenz;
 
 pub const PROTOCOL_VERSION: u32 = 1;
@@ -17,6 +18,7 @@ pub mod protocol {
 
 pub use config::{DaemonConfig, DaemonConfigError, InferenceConfig};
 pub use engine::{Engine, EngineOpenError};
+pub use server::{DaemonServer, ServerError};
 pub use zenz::{DEFAULT_INFERENCE_LIMIT, LlamaModel, ZenzConversionError};
 
 #[derive(Debug)]

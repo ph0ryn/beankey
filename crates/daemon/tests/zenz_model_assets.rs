@@ -1,7 +1,13 @@
-use std::path::PathBuf;
+use std::fs;
+use std::os::unix::net::UnixStream;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use beankey_daemon::protocol::envelope::Payload;
-use beankey_daemon::{Engine, PROTOCOL_VERSION, protocol};
+use beankey_daemon::{Engine, PROTOCOL_VERSION, protocol, read_envelope, write_envelope};
+use tempfile::TempDir;
 
 fn dictionary_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -55,4 +61,97 @@ fn converts_with_the_fixed_zenz_model_and_llama_backend() {
     };
     assert_eq!(state.preedit, "はし");
     assert!(!state.candidates.is_empty());
+}
+
+#[test]
+fn runs_the_server_executable_with_the_fixed_nixos_assets() {
+    let (Ok(model), Ok(backend), Ok(english), Ok(greek)) = (
+        std::env::var("BEANKEY_TEST_MODEL"),
+        std::env::var("BEANKEY_TEST_LLAMA_BACKEND"),
+        std::env::var("BEANKEY_TEST_EN_US_DICTIONARY"),
+        std::env::var("BEANKEY_TEST_EL_GR_DICTIONARY"),
+    ) else {
+        return;
+    };
+    let runtime = TempDir::new().unwrap();
+    let config_path = runtime.path().join("config.toml");
+    fs::write(
+        &config_path,
+        format!(
+            r#"
+dictionary = "{}"
+model = "{model}"
+llama_backend_directory = "{backend}"
+runtime_socket = "beankey/daemon.sock"
+
+[hunspell]
+english_dictionary = "{english}"
+greek_dictionary = "{greek}"
+
+[inference]
+context_size = 512
+batch_size = 512
+micro_batch_size = 64
+flash_attention = true
+"#,
+            dictionary_root().display()
+        ),
+    )
+    .unwrap();
+    let mut daemon = Command::new(env!("CARGO_BIN_EXE_beankey-daemon"))
+        .args(["--config", config_path.to_str().unwrap()])
+        .env("XDG_RUNTIME_DIR", runtime.path())
+        .spawn()
+        .unwrap();
+    let socket = runtime.path().join("beankey/daemon.sock");
+    let mut stream = connect_before(&socket, Duration::from_secs(5));
+
+    for request in [
+        envelope(
+            1,
+            Payload::StartSession(protocol::StartSession {
+                input_style: protocol::InputStyle::Direct as i32,
+                surrounding_text: None,
+            }),
+        ),
+        envelope(
+            2,
+            Payload::KeyEvent(protocol::KeyEvent {
+                text: "はし".into(),
+                ..Default::default()
+            }),
+        ),
+    ] {
+        write_envelope(&mut stream, &request).unwrap();
+        let response = read_envelope(&mut stream).unwrap();
+        assert!(matches!(response.payload, Some(Payload::StateResponse(_))));
+    }
+    drop(stream);
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(status) = daemon.try_wait().unwrap() {
+            assert!(status.success());
+            break;
+        }
+        if Instant::now() >= deadline {
+            daemon.kill().unwrap();
+            panic!("daemon did not exit after its last client disconnected");
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn connect_before(path: &Path, timeout: Duration) -> UnixStream {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match UnixStream::connect(path) {
+            Ok(stream) => return stream,
+            Err(error) if Instant::now() < deadline => {
+                let _ = error;
+                thread::sleep(Duration::from_millis(20));
+            }
+            Err(error) => panic!("could not connect to daemon: {error}"),
+        }
+    }
 }
