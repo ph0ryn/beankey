@@ -89,6 +89,12 @@ impl LatticeRange {
             Self::Surface { from, to } => ComposingCount::Surface(to - from),
         }
     }
+
+    fn starts_at_zero(self) -> bool {
+        match self {
+            Self::Input { from, .. } | Self::Surface { from, .. } => from == 0,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -201,6 +207,7 @@ pub struct Candidate {
     pub entries: Vec<DictionaryEntry>,
     pub ruby_count: usize,
     pub is_learning_target: bool,
+    pub is_typo_correction: bool,
     pub actions: Vec<CompleteAction>,
     first_clause: Option<FirstClause>,
 }
@@ -235,6 +242,7 @@ impl Candidate {
             entries,
             ruby_count,
             is_learning_target: self.is_learning_target,
+            is_typo_correction: self.is_typo_correction,
             actions: appropriate_actions(&first.text),
             first_clause: None,
         })
@@ -270,6 +278,7 @@ impl Candidate {
             entries,
             ruby_count,
             is_learning_target: true,
+            is_typo_correction: false,
             actions,
             first_clause: None,
         }
@@ -348,6 +357,16 @@ impl<'a> NormalConverter<'a> {
         self.convert_with_entries(composing, tables, n_best, context, &[])
     }
 
+    pub fn convert_with_typo_correction(
+        &self,
+        composing: &ComposingText,
+        tables: &InputTableRegistry,
+        n_best: usize,
+        context: ConversionContext,
+    ) -> Result<Vec<Candidate>, DictionaryError> {
+        self.convert_with_entries_and_typo(composing, tables, n_best, context, &[], true)
+    }
+
     pub(crate) fn convert_with_entries(
         &self,
         composing: &ComposingText,
@@ -355,6 +374,25 @@ impl<'a> NormalConverter<'a> {
         n_best: usize,
         context: ConversionContext,
         additional_entries: &[DictionaryEntry],
+    ) -> Result<Vec<Candidate>, DictionaryError> {
+        self.convert_with_entries_and_typo(
+            composing,
+            tables,
+            n_best,
+            context,
+            additional_entries,
+            false,
+        )
+    }
+
+    pub(crate) fn convert_with_entries_and_typo(
+        &self,
+        composing: &ComposingText,
+        tables: &InputTableRegistry,
+        n_best: usize,
+        context: ConversionContext,
+        additional_entries: &[DictionaryEntry],
+        need_typo_correction: bool,
     ) -> Result<Vec<Candidate>, DictionaryError> {
         if n_best == 0 || composing.is_empty() {
             return Ok(Vec::new());
@@ -370,6 +408,7 @@ impl<'a> NormalConverter<'a> {
 
         let mut nodes = Vec::new();
         let mut surface_nodes = vec![Vec::new(); surface_count];
+        let mut input_nodes = vec![Vec::new(); composing.input().len()];
         for start in 0..surface_count {
             let suffix = katakana_graphemes[start..].concat();
             for matched in self
@@ -429,13 +468,57 @@ impl<'a> NormalConverter<'a> {
             }
         }
 
+        if need_typo_correction {
+            for (start, start_nodes) in input_nodes.iter_mut().enumerate() {
+                for prefix in crate::typo::typo_prefixes(
+                    &composing.input()[start..],
+                    tables,
+                    MAXIMUM_DICTIONARY_LENGTH,
+                ) {
+                    let mut entries = self.dictionary.exact_match(&prefix.ruby)?;
+                    entries.extend(
+                        additional_entries
+                            .iter()
+                            .filter(|entry| entry.ruby == prefix.ruby)
+                            .cloned(),
+                    );
+                    for entry in entries {
+                        let adjustment = typo_adjustment(&entry, prefix.penalty);
+                        let entry = entry.adjusted(adjustment);
+                        if should_remove(&entry) {
+                            continue;
+                        }
+                        let node_index = nodes.len();
+                        nodes.push(LatticeNode {
+                            entry,
+                            range: LatticeRange::Input {
+                                from: start,
+                                to: start + prefix.consumed,
+                            },
+                            predecessors: if start == 0 {
+                                vec![Predecessor {
+                                    path: None,
+                                    total: 0.0,
+                                }]
+                            } else {
+                                Vec::new()
+                            },
+                        });
+                        start_nodes.push(node_index);
+                    }
+                }
+            }
+        }
+
         let mut results = Vec::new();
         for index in indices {
-            let Some(surface_index) = index.surface() else {
-                continue;
-            };
-            let is_head = index.input() == Some(0) && surface_index == 0;
-            let current_nodes = surface_nodes[surface_index].clone();
+            let mut current_nodes: Vec<usize> = Vec::new();
+            if let Some(surface_index) = index.surface() {
+                current_nodes.extend(surface_nodes[surface_index].iter().copied());
+            }
+            if let Some(input_index) = index.input() {
+                current_nodes.extend(input_nodes[input_index].iter().copied());
+            }
             for node_index in current_nodes {
                 let (entry, range, predecessors) = {
                     let node = &nodes[node_index];
@@ -446,7 +529,7 @@ impl<'a> NormalConverter<'a> {
                 }
                 let mut completed = Vec::with_capacity(predecessors.len());
                 for predecessor in predecessors {
-                    let head_connection = if is_head {
+                    let head_connection = if range.starts_at_zero() {
                         self.dictionary.connection_cost(
                             usize::from(context.right_id),
                             usize::from(entry.left_id),
@@ -464,14 +547,19 @@ impl<'a> NormalConverter<'a> {
                 }
 
                 let next_index = index_map.dual(range.end());
-                if next_index.surface() == Some(surface_count) {
+                if next_index.surface() == Some(surface_count)
+                    || next_index.input() == Some(composing.input().len())
+                {
                     results.extend(completed);
                     continue;
                 }
-                let Some(next_surface) = next_index.surface() else {
-                    continue;
-                };
-                let next_nodes = surface_nodes[next_surface].clone();
+                let mut next_nodes: Vec<usize> = Vec::new();
+                if let Some(next_surface) = next_index.surface() {
+                    next_nodes.extend(surface_nodes[next_surface].iter().copied());
+                }
+                if let Some(next_input) = next_index.input() {
+                    next_nodes.extend(input_nodes[next_input].iter().copied());
+                }
                 for next_node_index in next_nodes {
                     let connection = self.dictionary.connection_cost(
                         usize::from(entry.right_id),
@@ -740,6 +828,9 @@ impl<'a> NormalConverter<'a> {
         }
         paths.reverse();
 
+        let is_typo_correction = paths
+            .iter()
+            .any(|path| matches!(path.range, LatticeRange::Input { .. }));
         let mut clauses = vec![Clause {
             text: String::new(),
             value: 0.0,
@@ -818,6 +909,7 @@ impl<'a> NormalConverter<'a> {
             entries,
             ruby_count,
             is_learning_target: true,
+            is_typo_correction,
             actions,
             first_clause,
         }
@@ -921,6 +1013,18 @@ fn should_remove(entry: &DictionaryEntry) -> bool {
     }
     let word_count = UnicodeSegmentation::graphemes(entry.word.as_str(), true).count();
     word_count == 0 || -2.0 / (word_count as f32) < -distance
+}
+
+fn typo_adjustment(entry: &DictionaryEntry, penalty: f32) -> f32 {
+    let word_count = UnicodeSegmentation::graphemes(entry.word.as_str(), true)
+        .count()
+        .max(1) as f32;
+    let ratio = if (147..=554).contains(&entry.left_id) {
+        2.5
+    } else {
+        1.0
+    };
+    (-1.0 / word_count) * penalty * ratio
 }
 
 fn word_type(class_id: usize) -> u8 {

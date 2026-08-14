@@ -15,6 +15,14 @@ pub enum PredictionMode {
     Disabled,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum TypoCorrectionMode {
+    Enabled,
+    #[default]
+    Automatic,
+    Disabled,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RequestOptions {
     pub n_best: usize,
@@ -22,6 +30,7 @@ pub struct RequestOptions {
     pub full_width_roman: bool,
     pub half_width_kana: bool,
     pub version_string: Option<String>,
+    pub typo_correction: TypoCorrectionMode,
 }
 
 impl Default for RequestOptions {
@@ -32,6 +41,7 @@ impl Default for RequestOptions {
             full_width_roman: false,
             half_width_kana: false,
             version_string: None,
+            typo_correction: TypoCorrectionMode::Automatic,
         }
     }
 }
@@ -295,12 +305,13 @@ impl ConversionSession {
         options: RequestOptions,
     ) -> Result<ConversionResult, DictionaryError> {
         let additional = self.additional_dictionary();
-        let full = converter.convert_with_entries(
+        let full = converter.convert_with_entries_and_typo(
             &self.composing,
             tables,
             options.n_best,
             self.context,
             &additional,
+            options.typo_correction == TypoCorrectionMode::Enabled,
         )?;
         let mut first_clauses = unique(
             full.iter()
@@ -352,6 +363,28 @@ impl ConversionSession {
         }
         leading.sort_by(|left, right| right.value.total_cmp(&left.value));
         leading.truncate(5);
+        if !leading.iter().take(3).any(|candidate| {
+            candidate
+                .entries
+                .iter()
+                .map(|entry| entry.ruby.as_str())
+                .collect::<String>()
+                == katakana
+        }) && let Some(candidate) = full
+            .iter()
+            .find(|candidate| {
+                candidate
+                    .entries
+                    .iter()
+                    .map(|entry| entry.ruby.as_str())
+                    .collect::<String>()
+                    == katakana
+            })
+            .cloned()
+        {
+            leading.retain(|item| item.text != candidate.text);
+            leading.insert(2.min(leading.len()), candidate);
+        }
 
         let mut seen: std::collections::HashSet<_> = leading
             .iter()

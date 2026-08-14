@@ -6,6 +6,7 @@ mod post_prediction;
 mod session;
 mod special;
 mod template;
+mod typo;
 
 pub use dictionary::{
     CharacterIdMap, DictionaryBinaryError, DictionaryEntry, DictionaryError, DictionaryMatch,
@@ -24,6 +25,7 @@ pub use post_prediction::{
 };
 pub use session::{
     ConversionResult, ConversionSession, PredictionMode, RequestOptions, SelectionError,
+    TypoCorrectionMode,
 };
 pub use special::special_candidates;
 pub use template::expand_templates;
