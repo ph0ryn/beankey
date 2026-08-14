@@ -1,6 +1,7 @@
 mod dictionary;
 mod input;
 mod lattice;
+mod session;
 
 pub use dictionary::{
     CharacterIdMap, DictionaryBinaryError, DictionaryEntry, DictionaryError, DictionaryMatch,
@@ -12,4 +13,5 @@ pub use input::{
     FormatSide, InputElement, InputModifier, InputPiece, InputStyle, InputTable,
     InputTableExportError, InputTableId, InputTableRegistry, KeyElement, ValueElement,
 };
-pub use lattice::{Candidate, LatticeRange, NormalConverter};
+pub use lattice::{Candidate, ConversionContext, LatticeRange, NormalConverter};
+pub use session::{ConversionSession, SelectionError};

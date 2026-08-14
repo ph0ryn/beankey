@@ -13,6 +13,21 @@ const BOS_MEANING_ID: usize = 500;
 const DICTIONARY_THRESHOLD: f32 = -17.0;
 const MAXIMUM_DICTIONARY_LENGTH: usize = 20;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ConversionContext {
+    pub right_id: u16,
+    pub meaning_id: u16,
+}
+
+impl Default for ConversionContext {
+    fn default() -> Self {
+        Self {
+            right_id: BOS_CLASS_ID as u16,
+            meaning_id: BOS_MEANING_ID as u16,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 enum LatticeIndex {
     Input(usize),
@@ -187,6 +202,16 @@ impl<'a> NormalConverter<'a> {
         tables: &InputTableRegistry,
         n_best: usize,
     ) -> Result<Vec<Candidate>, DictionaryError> {
+        self.convert_with_context(composing, tables, n_best, ConversionContext::default())
+    }
+
+    pub fn convert_with_context(
+        &self,
+        composing: &ComposingText,
+        tables: &InputTableRegistry,
+        n_best: usize,
+        context: ConversionContext,
+    ) -> Result<Vec<Candidate>, DictionaryError> {
         if n_best == 0 || composing.is_empty() {
             return Ok(Vec::new());
         }
@@ -250,8 +275,10 @@ impl<'a> NormalConverter<'a> {
                 let mut completed = Vec::with_capacity(predecessors.len());
                 for predecessor in predecessors {
                     let head_connection = if is_head {
-                        self.dictionary
-                            .connection_cost(BOS_CLASS_ID, usize::from(entry.left_id))?
+                        self.dictionary.connection_cost(
+                            usize::from(context.right_id),
+                            usize::from(entry.left_id),
+                        )?
                     } else {
                         0.0
                     };
@@ -294,13 +321,13 @@ impl<'a> NormalConverter<'a> {
 
         let mut candidates: Vec<_> = results
             .into_iter()
-            .map(|path| self.make_candidate(path))
+            .map(|path| self.make_candidate(path, context))
             .collect();
         candidates.sort_by(|left, right| right.value.total_cmp(&left.value));
         Ok(unique_candidates(candidates))
     }
 
-    fn make_candidate(&self, path: Arc<RegisteredPath>) -> Candidate {
+    fn make_candidate(&self, path: Arc<RegisteredPath>, context: ConversionContext) -> Candidate {
         let mut paths = Vec::new();
         let mut cursor = Some(path);
         while let Some(current) = cursor {
@@ -312,7 +339,7 @@ impl<'a> NormalConverter<'a> {
         let mut clauses = vec![Clause {
             text: String::new(),
             value: 0.0,
-            meaning_id: BOS_MEANING_ID,
+            meaning_id: usize::from(context.meaning_id),
             ranges: Vec::new(),
         }];
         let mut entries = Vec::with_capacity(paths.len());
