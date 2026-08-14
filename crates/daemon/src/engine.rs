@@ -19,8 +19,8 @@ use beankey_llama::LlamaError;
 use serde::Deserialize;
 
 use crate::config::{
-    ConversionConfig, DaemonConfig, InputStyleConfig, KeyboardLanguageConfig, LmTypoLanguageModel,
-    PredictionConfig, TypoCorrectionConfig,
+    ConversionConfig, DaemonConfig, InputStyleConfig, KeyboardLanguageConfig, LearningConfig,
+    LearningModeConfig, LmTypoLanguageModel, PredictionConfig, TypoCorrectionConfig,
 };
 use crate::protocol::composing_count::Count;
 use crate::protocol::envelope::Payload;
@@ -273,7 +273,7 @@ impl Engine {
             &config.hunspell.english_dictionary,
             &config.hunspell.greek_dictionary,
         )?;
-        engine.load_learning(learning_directory)?;
+        engine.load_learning(learning_directory, &config.learning)?;
         engine.load_text_replacer(&config.emoji_dictionary)?;
         engine.load_conversion_resources(&config.conversion)?;
         engine.apply_conversion_options(&config.conversion)?;
@@ -298,7 +298,7 @@ impl Engine {
         learning_directory: impl AsRef<Path>,
     ) -> Result<Self, EngineOpenError> {
         let mut engine = Self::open(dictionary_path)?;
-        engine.load_learning(learning_directory)?;
+        engine.load_learning(learning_directory, &LearningConfig::default())?;
         Ok(engine)
     }
 
@@ -333,11 +333,20 @@ impl Engine {
         Ok(())
     }
 
-    fn load_learning(&mut self, learning_directory: impl AsRef<Path>) -> Result<(), LearningError> {
+    fn load_learning(
+        &mut self,
+        learning_directory: impl AsRef<Path>,
+        config: &LearningConfig,
+    ) -> Result<(), LearningError> {
+        let mode = match config.mode {
+            LearningModeConfig::InputAndOutput => LearningMode::InputAndOutput,
+            LearningModeConfig::OnlyOutput => LearningMode::OnlyOutput,
+            LearningModeConfig::Nothing => LearningMode::Nothing,
+        };
         self.learning_memory = Some(LearningMemory::open(
             learning_directory.as_ref().to_path_buf(),
-            LearningMode::InputAndOutput,
-            65_536,
+            mode,
+            config.max_count,
         )?);
         Ok(())
     }

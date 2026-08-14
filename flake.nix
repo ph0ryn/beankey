@@ -391,6 +391,8 @@
             grep -F 'llama_backend_directory = "${self.packages.${system}.daemon.llamaCpp}/bin"' "$config"
             grep -F 'runtime_socket = "beankey/daemon.sock"' "$config"
             grep -F 'keyboard_language = "japanese"' "$config"
+            grep -F 'mode = "input_and_output"' "$config"
+            grep -F 'max_count = 65536' "$config"
             touch "$out"
           '';
         }

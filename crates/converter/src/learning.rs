@@ -105,14 +105,20 @@ impl LearningMemory {
             path: directory.clone(),
             source,
         })?;
-        recover_if_paused(&directory)?;
-        let path = directory.join(MEMORY_FILE);
-        let mut persisted = match fs::read(&path) {
-            Ok(bytes) => decode(&bytes)?,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
-            Err(source) => return Err(LearningError::Io { path, source }),
+        let mut persisted = if mode.uses_memory() {
+            recover_if_paused(&directory)?;
+            let path = directory.join(MEMORY_FILE);
+            match fs::read(&path) {
+                Ok(bytes) => decode(&bytes)?,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
+                Err(source) => return Err(LearningError::Io { path, source }),
+            }
+        } else {
+            Vec::new()
         };
-        decay(&mut persisted, today);
+        if mode.uses_memory() {
+            decay(&mut persisted, today);
+        }
         Ok(Self {
             inner: Arc::new(Mutex::new(LearningState {
                 directory,
@@ -563,6 +569,19 @@ fn current_day() -> u16 {
 mod tests {
     use super::*;
 
+    fn memory(mode: LearningMode, persisted: Vec<LearningRecord>) -> LearningMemory {
+        LearningMemory {
+            inner: Arc::new(Mutex::new(LearningState {
+                directory: PathBuf::new(),
+                mode,
+                max_count: 128,
+                today: 10,
+                persisted,
+                temporary: Vec::new(),
+            })),
+        }
+    }
+
     fn entry(word: &str, ruby: &str) -> DictionaryEntry {
         DictionaryEntry {
             word: word.into(),
@@ -604,17 +623,53 @@ mod tests {
     }
 
     #[test]
-    fn learns_only_the_new_part_of_a_post_composition_prediction() {
-        let memory = LearningMemory {
-            inner: Arc::new(Mutex::new(LearningState {
-                directory: PathBuf::new(),
-                mode: LearningMode::InputAndOutput,
-                max_count: 128,
-                today: 10,
-                persisted: Vec::new(),
-                temporary: Vec::new(),
-            })),
+    fn honors_read_only_and_disabled_learning_modes() {
+        let persisted = LearningRecord {
+            entry: entry("既存", "キソン"),
+            last_used_day: 10,
+            last_updated_day: 10,
+            count: 1,
         };
+        let candidate = Candidate::single(
+            "新規".into(),
+            -12.0,
+            crate::ComposingCount::Surface(2),
+            501,
+            vec![entry("新規", "シンキ")],
+        );
+        let read_only = memory(LearningMode::OnlyOutput, vec![persisted.clone()]);
+        read_only.learn(&candidate).unwrap();
+        assert!(!read_only.commit().unwrap());
+        assert_eq!(read_only.entries().unwrap().len(), 1);
+
+        let disabled = memory(LearningMode::Nothing, vec![persisted]);
+        disabled.learn(&candidate).unwrap();
+        assert!(!disabled.commit().unwrap());
+        assert!(disabled.entries().unwrap().is_empty());
+    }
+
+    #[test]
+    fn disabled_learning_ignores_corrupt_persistence() {
+        let directory = std::env::temp_dir().join(format!(
+            "beankey-disabled-learning-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join(MEMORY_FILE), b"corrupt").unwrap();
+
+        let disabled = LearningMemory::open(&directory, LearningMode::Nothing, 128).unwrap();
+        assert!(disabled.entries().unwrap().is_empty());
+        disabled.reset().unwrap();
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn learns_only_the_new_part_of_a_post_composition_prediction() {
+        let memory = memory(LearningMode::InputAndOutput, Vec::new());
         let base_entry = entry("今日", "キョウ");
         let base = Candidate::single(
             "今日".into(),

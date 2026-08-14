@@ -155,6 +155,10 @@ let
       greek_dictionary = "${packages.daemon.hunspellGreek}/share/hunspell/el_GR";
     };
     conversion = conversionConfig;
+    learning = {
+      mode = cfg.learning.mode;
+      max_count = cfg.learning.maxCount;
+    };
     zenz = zenzConfig;
     lm_typo = lmTypoConfig;
     inference = {
@@ -236,6 +240,23 @@ in
         type = types.attrsOf types.path;
         default = { };
         description = "Named custom input table JSON files.";
+      };
+    };
+
+    learning = {
+      mode = mkOption {
+        type = types.enum [
+          "input_and_output"
+          "only_output"
+          "nothing"
+        ];
+        default = "input_and_output";
+        description = "Whether learning data is updated, only read, or ignored.";
+      };
+      maxCount = mkOption {
+        type = types.ints.unsigned;
+        default = 65536;
+        description = "Maximum number of persisted learning records.";
       };
     };
 

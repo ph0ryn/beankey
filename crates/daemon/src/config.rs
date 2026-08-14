@@ -20,6 +20,8 @@ pub struct DaemonConfig {
     pub runtime_socket: PathBuf,
     pub hunspell: HunspellConfig,
     pub conversion: ConversionConfig,
+    #[serde(default)]
+    pub learning: LearningConfig,
     pub zenz: ZenzConfig,
     #[serde(default)]
     pub lm_typo: LmTypoCorrectionConfig,
@@ -43,6 +45,31 @@ pub struct ConversionConfig {
     pub user_dictionary: Option<PathBuf>,
     pub user_dictionary_directory: Option<PathBuf>,
     pub custom_input_tables: BTreeMap<String, PathBuf>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct LearningConfig {
+    pub mode: LearningModeConfig,
+    pub max_count: usize,
+}
+
+impl Default for LearningConfig {
+    fn default() -> Self {
+        Self {
+            mode: LearningModeConfig::InputAndOutput,
+            max_count: 65_536,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum LearningModeConfig {
+    #[default]
+    InputAndOutput,
+    OnlyOutput,
+    Nothing,
 }
 
 impl Default for ConversionConfig {
@@ -377,6 +404,10 @@ typo_correction = "automatic"
 live_conversion = false
 custom_input_tables = {}
 
+[learning]
+mode = "input_and_output"
+max_count = 65536
+
 [zenz]
 inference_limit = 10
 rich_candidates = false
@@ -410,6 +441,7 @@ flash_attention = true
             config.conversion.keyboard_language,
             KeyboardLanguageConfig::Japanese
         );
+        assert_eq!(config.learning, LearningConfig::default());
     }
 
     #[test]
