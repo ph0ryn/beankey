@@ -238,6 +238,16 @@ impl Candidate {
         last_meaning_id: u16,
         entries: Vec<DictionaryEntry>,
     ) -> Self {
+        Self::single(text, value, composing_count, last_meaning_id, entries)
+    }
+
+    fn single(
+        text: String,
+        value: f32,
+        composing_count: ComposingCount,
+        last_meaning_id: u16,
+        entries: Vec<DictionaryEntry>,
+    ) -> Self {
         let ruby_count = entries
             .iter()
             .map(|entry| UnicodeSegmentation::graphemes(entry.ruby.as_str(), true).count())
@@ -526,6 +536,87 @@ impl<'a> NormalConverter<'a> {
         Ok(output)
     }
 
+    pub fn word_candidates(
+        &self,
+        composing: &ComposingText,
+    ) -> Result<Vec<Candidate>, DictionaryError> {
+        if composing.is_empty() {
+            return Ok(Vec::new());
+        }
+        let katakana = to_katakana(&composing.surface());
+        let mut output = Vec::new();
+        for matched in self
+            .dictionary
+            .matches_from_start(&katakana, MAXIMUM_DICTIONARY_LENGTH)?
+        {
+            for entry in matched.entries {
+                let value = entry.value();
+                output.push(Candidate::single(
+                    entry.word.clone(),
+                    value,
+                    ComposingCount::Surface(matched.surface_end),
+                    entry.meaning_id,
+                    vec![entry],
+                ));
+            }
+        }
+        output = unique_candidates(output);
+        output.sort_by(|left, right| {
+            right
+                .ruby_count
+                .cmp(&left.ruby_count)
+                .then_with(|| right.value.total_cmp(&left.value))
+        });
+        Ok(output)
+    }
+
+    pub fn representation_candidates(
+        &self,
+        composing: &ComposingText,
+        full_width_roman: bool,
+        half_width_kana: bool,
+    ) -> Vec<Candidate> {
+        let katakana = to_katakana(&composing.surface());
+        let composing_count = ComposingCount::Input(composing.input().len());
+        let mut output = Vec::new();
+        let katakana_value = -14.0 * katakana_score(&katakana);
+        output.push(representation_candidate(
+            katakana.clone(),
+            katakana.clone(),
+            katakana_value,
+            composing_count.clone(),
+        ));
+        output.push(representation_candidate(
+            to_hiragana(&katakana),
+            katakana.clone(),
+            -14.5,
+            composing_count.clone(),
+        ));
+        output.push(representation_candidate(
+            katakana.to_uppercase(),
+            katakana.clone(),
+            -14.6,
+            composing_count.clone(),
+        ));
+        if full_width_roman {
+            output.push(representation_candidate(
+                to_full_width(&katakana),
+                katakana.clone(),
+                -14.7,
+                composing_count.clone(),
+            ));
+        }
+        if half_width_kana {
+            output.push(representation_candidate(
+                to_half_width(&katakana),
+                katakana.clone(),
+                -15.0,
+                composing_count,
+            ));
+        }
+        output
+    }
+
     fn make_candidate(&self, path: Arc<RegisteredPath>, context: ConversionContext) -> Candidate {
         let mut paths = Vec::new();
         let mut cursor = Some(path);
@@ -735,6 +826,166 @@ fn to_katakana(value: &str) -> String {
         .collect()
 }
 
+fn to_hiragana(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| match character {
+            '\u{30A1}'..='\u{30F6}' => {
+                char::from_u32(u32::from(character) - 96).expect("hiragana scalar is valid")
+            }
+            _ => character,
+        })
+        .collect()
+}
+
+fn katakana_score(value: &str) -> f32 {
+    value.chars().fold(1.0, |score, character| {
+        score
+            * if "プヴペィフ".contains(character) {
+                0.5
+            } else if "ュピポ".contains(character) {
+                0.6
+            } else if "パォグーム".contains(character) {
+                0.7
+            } else {
+                1.0
+            }
+    })
+}
+
+fn representation_candidate(
+    word: String,
+    ruby: String,
+    value: f32,
+    composing_count: ComposingCount,
+) -> Candidate {
+    let entry = DictionaryEntry {
+        word: word.clone(),
+        ruby,
+        left_id: 1288,
+        right_id: 1288,
+        meaning_id: 501,
+        base_value: value,
+        adjustment: 0.0,
+        metadata: Default::default(),
+    };
+    Candidate::single(word, value, composing_count, 501, vec![entry])
+}
+
+fn to_full_width(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| match character {
+            ' ' => '\u{3000}',
+            '!'..='~' => {
+                char::from_u32(u32::from(character) + 0xfee0).expect("full-width scalar is valid")
+            }
+            _ => character,
+        })
+        .collect()
+}
+
+fn to_half_width(value: &str) -> String {
+    let mut output = String::new();
+    for character in value.chars() {
+        let mapped = match character {
+            '。' => "｡",
+            '「' => "｢",
+            '」' => "｣",
+            '、' => "､",
+            '・' => "･",
+            'ヲ' => "ｦ",
+            'ァ' => "ｧ",
+            'ィ' => "ｨ",
+            'ゥ' => "ｩ",
+            'ェ' => "ｪ",
+            'ォ' => "ｫ",
+            'ャ' => "ｬ",
+            'ュ' => "ｭ",
+            'ョ' => "ｮ",
+            'ッ' => "ｯ",
+            'ー' => "ｰ",
+            'ア' => "ｱ",
+            'イ' => "ｲ",
+            'ウ' => "ｳ",
+            'エ' => "ｴ",
+            'オ' => "ｵ",
+            'カ' => "ｶ",
+            'キ' => "ｷ",
+            'ク' => "ｸ",
+            'ケ' => "ｹ",
+            'コ' => "ｺ",
+            'サ' => "ｻ",
+            'シ' => "ｼ",
+            'ス' => "ｽ",
+            'セ' => "ｾ",
+            'ソ' => "ｿ",
+            'タ' => "ﾀ",
+            'チ' => "ﾁ",
+            'ツ' => "ﾂ",
+            'テ' => "ﾃ",
+            'ト' => "ﾄ",
+            'ナ' => "ﾅ",
+            'ニ' => "ﾆ",
+            'ヌ' => "ﾇ",
+            'ネ' => "ﾈ",
+            'ノ' => "ﾉ",
+            'ハ' => "ﾊ",
+            'ヒ' => "ﾋ",
+            'フ' => "ﾌ",
+            'ヘ' => "ﾍ",
+            'ホ' => "ﾎ",
+            'マ' => "ﾏ",
+            'ミ' => "ﾐ",
+            'ム' => "ﾑ",
+            'メ' => "ﾒ",
+            'モ' => "ﾓ",
+            'ヤ' => "ﾔ",
+            'ユ' => "ﾕ",
+            'ヨ' => "ﾖ",
+            'ラ' => "ﾗ",
+            'リ' => "ﾘ",
+            'ル' => "ﾙ",
+            'レ' => "ﾚ",
+            'ロ' => "ﾛ",
+            'ワ' => "ﾜ",
+            'ン' => "ﾝ",
+            'ヴ' => "ｳﾞ",
+            'ガ' => "ｶﾞ",
+            'ギ' => "ｷﾞ",
+            'グ' => "ｸﾞ",
+            'ゲ' => "ｹﾞ",
+            'ゴ' => "ｺﾞ",
+            'ザ' => "ｻﾞ",
+            'ジ' => "ｼﾞ",
+            'ズ' => "ｽﾞ",
+            'ゼ' => "ｾﾞ",
+            'ゾ' => "ｿﾞ",
+            'ダ' => "ﾀﾞ",
+            'ヂ' => "ﾁﾞ",
+            'ヅ' => "ﾂﾞ",
+            'デ' => "ﾃﾞ",
+            'ド' => "ﾄﾞ",
+            'バ' => "ﾊﾞ",
+            'ビ' => "ﾋﾞ",
+            'ブ' => "ﾌﾞ",
+            'ベ' => "ﾍﾞ",
+            'ボ' => "ﾎﾞ",
+            'パ' => "ﾊﾟ",
+            'ピ' => "ﾋﾟ",
+            'プ' => "ﾌﾟ",
+            'ペ' => "ﾍﾟ",
+            'ポ' => "ﾎﾟ",
+            _ => {
+                output.push(character);
+                continue;
+            }
+        };
+        output.push_str(mapped);
+    }
+    output
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -787,5 +1038,11 @@ mod tests {
         assert_eq!(indices.first().and_then(|index| index.input()), Some(0));
         assert_eq!(indices.first().and_then(|index| index.surface()), Some(0));
         assert!(indices.windows(2).all(|pair| pair[0] != pair[1]));
+    }
+
+    #[test]
+    fn converts_optional_width_representations() {
+        assert_eq!(to_full_width("ABC 123"), "ＡＢＣ　１２３");
+        assert_eq!(to_half_width("ガッツポーズ"), "ｶﾞｯﾂﾎﾟｰｽﾞ");
     }
 }

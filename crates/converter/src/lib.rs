@@ -14,4 +14,6 @@ pub use input::{
     InputTableExportError, InputTableId, InputTableRegistry, KeyElement, ValueElement,
 };
 pub use lattice::{Candidate, ConversionContext, LatticeRange, NormalConverter};
-pub use session::{ConversionSession, SelectionError};
+pub use session::{
+    ConversionResult, ConversionSession, PredictionMode, RequestOptions, SelectionError,
+};
