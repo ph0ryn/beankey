@@ -7,7 +7,7 @@
   };
 
   outputs =
-    { nixpkgs, ... }:
+    { self, nixpkgs, ... }:
     let
       systems = [
         "aarch64-darwin"
@@ -231,6 +231,11 @@
           postInstall = ''
             install -Dm644 ${./LICENSE} "$out/share/licenses/beankey/LICENSE"
           '';
+          passthru = {
+            llamaCpp = pkgs.llama-cpp;
+            hunspellEnglish = pkgs.hunspellDicts.en_US;
+            hunspellGreek = pkgs.hunspellDicts.el_GR;
+          };
           meta = {
             description = "beankey kana-kanji conversion daemon";
             license = pkgs.lib.licenses.mit;
@@ -275,6 +280,8 @@
         };
     in
     {
+      nixosModules.default = import ./nix/module.nix { inherit self; };
+
       packages = forAllSystems (
         system:
         let
@@ -320,6 +327,24 @@
         system:
         let
           pkgs = pkgsFor system;
+          moduleEvaluation = nixpkgs.lib.nixosSystem {
+            inherit system;
+            modules = [
+              self.nixosModules.default
+              {
+                programs.beankey.enable = true;
+                system.stateVersion = "26.05";
+              }
+            ];
+          };
+          moduleConfig = moduleEvaluation.config;
+          moduleConfigSource =
+            assert builtins.elem self.packages.${system}.fcitx5-addon
+              moduleConfig.i18n.inputMethod.fcitx5.addons;
+            assert builtins.elem self.packages.${system}.daemon moduleConfig.environment.systemPackages;
+            assert !(moduleConfig.systemd.services ? beankey);
+            assert !(moduleConfig.systemd.sockets ? beankey);
+            moduleConfig.environment.etc."beankey/config.toml".source;
         in
         {
           cargo-metadata =
@@ -357,6 +382,16 @@
                 rustc --version
                 touch "$out"
               '';
+        }
+        // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+          nixos-module = pkgs.runCommand "beankey-nixos-module" { } ''
+            config=${moduleConfigSource}
+            grep -F 'dictionary = "${self.packages.${system}.dictionary}/share/beankey/dictionary"' "$config"
+            grep -F 'model = "${self.packages.${system}.model}/share/beankey/model/ggml-model-Q5_K_M.gguf"' "$config"
+            grep -F 'llama_backend_directory = "${self.packages.${system}.daemon.llamaCpp}/bin"' "$config"
+            grep -F 'runtime_socket = "beankey/daemon.sock"' "$config"
+            touch "$out"
+          '';
         }
       );
     };
