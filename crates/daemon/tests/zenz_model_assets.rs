@@ -102,6 +102,7 @@ flash_attention = true
     let mut daemon = Command::new(env!("CARGO_BIN_EXE_beankey-daemon"))
         .args(["--config", config_path.to_str().unwrap()])
         .env("XDG_RUNTIME_DIR", runtime.path())
+        .env("XDG_STATE_HOME", runtime.path().join("state"))
         .spawn()
         .unwrap();
     let socket = runtime.path().join("beankey/daemon.sock");

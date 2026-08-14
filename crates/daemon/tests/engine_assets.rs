@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use beankey_converter::{ZenzInferenceError, ZenzLanguageModel};
 use beankey_daemon::protocol::envelope::Payload;
 use beankey_daemon::{Engine, PROTOCOL_VERSION, protocol};
+use tempfile::TempDir;
 
 fn dictionary_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -155,6 +156,76 @@ fn completes_foreign_input_with_the_configured_hunspell_assets() {
             .iter()
             .any(|candidate| candidate.text == "καλά")
     );
+}
+
+#[test]
+fn persists_forgets_and_resets_learning_through_session_requests() {
+    let state = TempDir::new().unwrap();
+    let mut engine = Engine::open_with_learning(dictionary_root(), state.path()).unwrap();
+    response(engine.handle(envelope(
+        1,
+        Payload::StartSession(protocol::StartSession {
+            input_style: protocol::InputStyle::RomanToKana as i32,
+            surrounding_text: None,
+            keyboard_language: protocol::KeyboardLanguage::Japanese as i32,
+        }),
+    )));
+    let converted = response(engine.handle(envelope(
+        2,
+        Payload::KeyEvent(protocol::KeyEvent {
+            text: "shikai".into(),
+            ..Default::default()
+        }),
+    )));
+    let selected = converted
+        .candidates
+        .iter()
+        .position(|candidate| candidate.text == "司会")
+        .unwrap();
+    response(engine.handle(envelope(
+        3,
+        Payload::SelectCandidate(protocol::SelectCandidate {
+            index: selected as u32,
+        }),
+    )));
+    let memory_path = state.path().join("memory.bin");
+    let learned_size = std::fs::metadata(&memory_path).unwrap().len();
+    drop(engine);
+
+    let mut restarted = Engine::open_with_learning(dictionary_root(), state.path()).unwrap();
+    response(restarted.handle(envelope(
+        1,
+        Payload::StartSession(protocol::StartSession {
+            input_style: protocol::InputStyle::RomanToKana as i32,
+            surrounding_text: None,
+            keyboard_language: protocol::KeyboardLanguage::Japanese as i32,
+        }),
+    )));
+    let converted = response(restarted.handle(envelope(
+        2,
+        Payload::KeyEvent(protocol::KeyEvent {
+            text: "shikai".into(),
+            ..Default::default()
+        }),
+    )));
+    let learned = converted
+        .candidates
+        .iter()
+        .position(|candidate| candidate.text == "司会")
+        .unwrap();
+    response(restarted.handle(envelope(
+        3,
+        Payload::ForgetCandidate(protocol::ForgetCandidate {
+            index: learned as u32,
+        }),
+    )));
+    assert!(std::fs::metadata(&memory_path).unwrap().len() < learned_size);
+
+    response(restarted.handle(envelope(
+        4,
+        Payload::ResetLearning(protocol::ResetLearning {}),
+    )));
+    assert!(!memory_path.exists());
 }
 
 #[test]

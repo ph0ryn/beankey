@@ -8,8 +8,8 @@ use beankey_converter::{
     CompleteAction, ComposingCount as ConverterComposingCount, ConversionSession, DictionaryError,
     DictionaryStore, ForeignCompletionProvider, HunspellCompleter, HunspellError, InputModifier,
     InputStyle as ConverterInputStyle, InputTableId, InputTableRegistry, KeyboardLanguage,
-    NormalConverter, PredictionMode, RequestOptions, SelectionError, ZenzLanguageModel,
-    ZenzVersionConfig,
+    LearningError, LearningMemory, LearningMode, NormalConverter, PredictionMode, RequestOptions,
+    SelectionError, ZenzLanguageModel, ZenzVersionConfig,
 };
 use beankey_llama::LlamaError;
 
@@ -56,6 +56,7 @@ pub struct Engine {
     zenz_rich_candidates: bool,
     zenz_inference_limit: usize,
     foreign_completion_provider: Option<Arc<dyn ForeignCompletionProvider>>,
+    learning_memory: Option<LearningMemory>,
 }
 
 #[derive(Debug)]
@@ -63,6 +64,7 @@ pub enum EngineOpenError {
     Dictionary(DictionaryError),
     Llama(LlamaError),
     Hunspell(HunspellError),
+    Learning(LearningError),
 }
 
 impl fmt::Display for EngineOpenError {
@@ -71,6 +73,7 @@ impl fmt::Display for EngineOpenError {
             Self::Dictionary(error) => error.fmt(formatter),
             Self::Llama(error) => error.fmt(formatter),
             Self::Hunspell(error) => error.fmt(formatter),
+            Self::Learning(error) => error.fmt(formatter),
         }
     }
 }
@@ -81,6 +84,7 @@ impl Error for EngineOpenError {
             Self::Dictionary(error) => Some(error),
             Self::Llama(error) => Some(error),
             Self::Hunspell(error) => Some(error),
+            Self::Learning(error) => Some(error),
         }
     }
 }
@@ -103,6 +107,12 @@ impl From<HunspellError> for EngineOpenError {
     }
 }
 
+impl From<LearningError> for EngineOpenError {
+    fn from(value: LearningError) -> Self {
+        Self::Learning(value)
+    }
+}
+
 impl Engine {
     pub fn open(dictionary_path: impl AsRef<Path>) -> Result<Self, DictionaryError> {
         Ok(Self {
@@ -114,6 +124,7 @@ impl Engine {
             zenz_rich_candidates: false,
             zenz_inference_limit: zenz::DEFAULT_INFERENCE_LIMIT,
             foreign_completion_provider: None,
+            learning_memory: None,
         })
     }
 
@@ -143,9 +154,11 @@ impl Engine {
         backend_directory: impl AsRef<Path>,
         english_dictionary: impl AsRef<Path>,
         greek_dictionary: impl AsRef<Path>,
+        learning_directory: impl AsRef<Path>,
     ) -> Result<Self, EngineOpenError> {
         let mut engine = Self::open_with_llama(dictionary_path, model_path, backend_directory)?;
         engine.load_hunspell(english_dictionary, greek_dictionary)?;
+        engine.load_learning(learning_directory)?;
         Ok(engine)
     }
 
@@ -159,6 +172,15 @@ impl Engine {
         Ok(engine)
     }
 
+    pub fn open_with_learning(
+        dictionary_path: impl AsRef<Path>,
+        learning_directory: impl AsRef<Path>,
+    ) -> Result<Self, EngineOpenError> {
+        let mut engine = Self::open(dictionary_path)?;
+        engine.load_learning(learning_directory)?;
+        Ok(engine)
+    }
+
     fn load_hunspell(
         &mut self,
         english_dictionary: impl AsRef<Path>,
@@ -168,6 +190,15 @@ impl Engine {
             english_dictionary,
             greek_dictionary,
         )?));
+        Ok(())
+    }
+
+    fn load_learning(&mut self, learning_directory: impl AsRef<Path>) -> Result<(), LearningError> {
+        self.learning_memory = Some(LearningMemory::open(
+            learning_directory.as_ref().to_path_buf(),
+            LearningMode::InputAndOutput,
+            65_536,
+        )?);
         Ok(())
     }
 
@@ -229,6 +260,16 @@ impl Engine {
                 let mut conversion = ConversionSession::new();
                 if let Some(provider) = &self.foreign_completion_provider {
                     conversion.set_foreign_completion_provider(provider.clone());
+                }
+                if let Some(memory) = &self.learning_memory
+                    && let Err(error) = conversion.set_learning_memory(memory.clone())
+                {
+                    return error_envelope(
+                        request_id,
+                        session_id,
+                        Code::Internal,
+                        format!("learning memory initialization failed: {error}"),
+                    );
                 }
                 self.sessions.insert(
                     session_id.clone(),
@@ -331,6 +372,10 @@ impl Engine {
             Payload::SelectCandidate(selection) => {
                 self.select_candidate(&mut session, selection.index as usize)
             }
+            Payload::ForgetCandidate(forget) => {
+                self.forget_candidate(&mut session, forget.index as usize)
+            }
+            Payload::ResetLearning(_) => self.reset_learning(&mut session),
             Payload::PageCandidates(page) => {
                 if !page_candidates(&mut session, page) {
                     self.sessions.insert(session_id.clone(), session);
@@ -489,6 +534,12 @@ impl Engine {
                     format!("candidate selection failed: {error}"),
                 ),
             })?;
+        session.conversion.commit_learning().map_err(|error| {
+            (
+                Code::Internal,
+                format!("learning memory commit failed: {error}"),
+            )
+        })?;
         session.selected_candidate = 0;
         if !session.conversion.composing().is_empty() {
             self.request_candidates(session)?;
@@ -501,7 +552,60 @@ impl Engine {
         ))
     }
 
+    fn forget_candidate(
+        &mut self,
+        session: &mut SessionState,
+        index: usize,
+    ) -> SessionRequestResult<protocol::StateResponse> {
+        let candidate = session
+            .conversion
+            .candidates()
+            .get(index)
+            .cloned()
+            .ok_or_else(|| {
+                (
+                    Code::InvalidPayload,
+                    format!("candidate index {index} is outside the current candidates"),
+                )
+            })?;
+        session
+            .conversion
+            .forget_learning(&candidate)
+            .map_err(|error| {
+                (
+                    Code::Internal,
+                    format!("learning memory forget failed: {error}"),
+                )
+            })?;
+        session.selected_candidate = 0;
+        self.request_candidates(session)?;
+        Ok(make_state(session, true, String::new(), false))
+    }
+
+    fn reset_learning(
+        &mut self,
+        session: &mut SessionState,
+    ) -> SessionRequestResult<protocol::StateResponse> {
+        session.conversion.reset_learning().map_err(|error| {
+            (
+                Code::Internal,
+                format!("learning memory reset failed: {error}"),
+            )
+        })?;
+        session.selected_candidate = 0;
+        if !session.conversion.composing().is_empty() {
+            self.request_candidates(session)?;
+        }
+        Ok(make_state(session, true, String::new(), false))
+    }
+
     fn request_candidates(&mut self, session: &mut SessionState) -> SessionRequestResult<()> {
+        session.conversion.refresh_learning().map_err(|error| {
+            (
+                Code::Internal,
+                format!("learning memory refresh failed: {error}"),
+            )
+        })?;
         let converter = NormalConverter::new(&self.dictionary);
         if let Some(model) = self.zenz_model.as_deref_mut() {
             let version = version_with_context(&self.zenz_version, &session.surrounding);

@@ -62,6 +62,12 @@ message PageCandidates {
 
 message CommitComposition {}
 
+message ForgetCandidate {
+  uint32 index = 1;
+}
+
+message ResetLearning {}
+
 message ComposingCount {
   oneof count {
     uint32 input = 1;
@@ -130,6 +136,8 @@ message Envelope {
     SelectCandidate select_candidate = 14;
     PageCandidates page_candidates = 15;
     CommitComposition commit_composition = 16;
+    ForgetCandidate forget_candidate = 17;
+    ResetLearning reset_learning = 18;
     StateResponse state_response = 20;
     ProtocolError protocol_error = 21;
   }
