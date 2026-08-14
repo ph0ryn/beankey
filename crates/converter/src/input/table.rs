@@ -28,7 +28,7 @@ impl InputPiece {
         Self::Character(value.into())
     }
 
-    fn displayed(&self) -> Option<&str> {
+    pub(crate) fn displayed(&self) -> Option<&str> {
         match self {
             Self::Character(value) => Some(value),
             Self::CompositionSeparator => None,
