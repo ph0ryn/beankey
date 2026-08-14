@@ -165,6 +165,45 @@ pub struct Candidate {
     pub last_meaning_id: u16,
     pub entries: Vec<DictionaryEntry>,
     pub ruby_count: usize,
+    first_clause: Option<FirstClause>,
+}
+
+impl Candidate {
+    pub fn first_clause_candidate(&self) -> Option<Self> {
+        let first = self.first_clause.as_ref()?;
+        if first.entry_end + 1 == self.entries.len() {
+            return None;
+        }
+        let entries = self.entries[..=first.entry_end].to_vec();
+        let ruby_count = entries
+            .iter()
+            .map(|entry| UnicodeSegmentation::graphemes(entry.ruby.as_str(), true).count())
+            .sum();
+        Some(Self {
+            text: first.text.clone(),
+            value: first.value,
+            composing_count: first
+                .ranges
+                .iter()
+                .copied()
+                .map(LatticeRange::count)
+                .reduce(combine_counts)
+                .unwrap_or(ComposingCount::Input(0)),
+            last_meaning_id: u16::try_from(first.meaning_id).unwrap_or(u16::MAX),
+            entries,
+            ruby_count,
+            first_clause: None,
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct FirstClause {
+    text: String,
+    value: f32,
+    meaning_id: usize,
+    ranges: Vec<LatticeRange>,
+    entry_end: usize,
 }
 
 #[derive(Clone)]
@@ -341,6 +380,7 @@ impl<'a> NormalConverter<'a> {
             value: 0.0,
             meaning_id: usize::from(context.meaning_id),
             ranges: Vec::new(),
+            entry_end: 0,
         }];
         let mut entries = Vec::with_capacity(paths.len());
         let mut previous_right = BOS_CLASS_ID;
@@ -358,12 +398,14 @@ impl<'a> NormalConverter<'a> {
                         BOS_MEANING_ID
                     },
                     ranges: Vec::new(),
+                    entry_end: entries.len(),
                 });
             }
             let clause = clauses.last_mut().expect("a candidate has a clause");
             clause.text.push_str(&entry.word);
             clause.value = current.total;
             clause.ranges.push(current.range);
+            clause.entry_end = entries.len();
             if (clause.meaning_id == BOS_MEANING_ID && entry.meaning_id != BOS_MEANING_ID as u16)
                 || includes_meaning(entry)
             {
@@ -393,6 +435,13 @@ impl<'a> NormalConverter<'a> {
             .iter()
             .map(|entry| UnicodeSegmentation::graphemes(entry.ruby.as_str(), true).count())
             .sum();
+        let first_clause = clauses.first().map(|clause| FirstClause {
+            text: clause.text.clone(),
+            value: clause.value,
+            meaning_id: clause.meaning_id,
+            ranges: clause.ranges.clone(),
+            entry_end: clause.entry_end,
+        });
         Candidate {
             text,
             value: clauses
@@ -402,6 +451,7 @@ impl<'a> NormalConverter<'a> {
             last_meaning_id: u16::try_from(previous_meaning).unwrap_or(u16::MAX),
             entries,
             ruby_count,
+            first_clause,
         }
     }
 }
@@ -411,6 +461,7 @@ struct Clause {
     value: f32,
     meaning_id: usize,
     ranges: Vec<LatticeRange>,
+    entry_end: usize,
 }
 
 fn insert_predecessor(values: &mut Vec<Predecessor>, value: Predecessor, n_best: usize) {

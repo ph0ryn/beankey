@@ -90,6 +90,25 @@ impl ConversionSession {
     ) -> Result<&[Candidate], DictionaryError> {
         self.candidates =
             converter.convert_with_context(&self.composing, tables, n_best, self.context)?;
+        let mut seen: std::collections::HashSet<_> = self
+            .candidates
+            .iter()
+            .map(|candidate| candidate.text.clone())
+            .collect();
+        let mut first_clauses: Vec<_> = self
+            .candidates
+            .iter()
+            .filter_map(Candidate::first_clause_candidate)
+            .filter(|candidate| seen.insert(candidate.text.clone()))
+            .collect();
+        first_clauses.sort_by(|left, right| {
+            right
+                .ruby_count
+                .cmp(&left.ruby_count)
+                .then_with(|| right.value.total_cmp(&left.value))
+        });
+        first_clauses.truncate(5);
+        self.candidates.extend(first_clauses);
         Ok(&self.candidates)
     }
 

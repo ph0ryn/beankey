@@ -32,3 +32,23 @@ fn selects_and_commits_a_candidate_without_leaking_between_sessions() {
     assert_eq!(second.composing().surface(), "かな");
     assert!(second.candidates().is_empty());
 }
+
+#[test]
+fn partially_commits_the_first_clause_and_converts_the_remainder() {
+    let dictionary = DictionaryStore::open(dictionary_root()).unwrap();
+    let converter = NormalConverter::new(&dictionary);
+    let tables = InputTableRegistry::new();
+    let mut session = ConversionSession::new();
+    session.insert_str("わがはいはねこ", InputStyle::Direct, &tables);
+
+    let candidates = session.request_candidates(&converter, &tables, 10).unwrap();
+    let index = candidates
+        .iter()
+        .position(|candidate| candidate.text == "吾輩は")
+        .unwrap();
+    assert_eq!(session.select_candidate(index, &tables).unwrap(), "吾輩は");
+    assert_eq!(session.composing().surface(), "ねこ");
+
+    let remaining = session.request_candidates(&converter, &tables, 10).unwrap();
+    assert!(remaining.iter().any(|candidate| candidate.text == "猫"));
+}
