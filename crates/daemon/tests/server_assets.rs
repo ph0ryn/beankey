@@ -55,6 +55,7 @@ fn serves_isolated_connections_and_exits_after_the_last_disconnect() {
                 Payload::StartSession(protocol::StartSession {
                     input_style: protocol::InputStyle::Direct as i32,
                     surrounding_text: None,
+                    keyboard_language: protocol::KeyboardLanguage::Japanese as i32,
                 }),
             ),
         );

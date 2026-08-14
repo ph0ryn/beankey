@@ -36,6 +36,7 @@ fn converts_selects_commits_and_resets_a_session() {
         Payload::StartSession(protocol::StartSession {
             input_style: protocol::InputStyle::RomanToKana as i32,
             surrounding_text: None,
+            keyboard_language: protocol::KeyboardLanguage::Japanese as i32,
         }),
     )));
     let converted = response(engine.handle(envelope(
@@ -84,6 +85,7 @@ fn forwards_explicit_kana_key_intention_and_input() {
         Payload::StartSession(protocol::StartSession {
             input_style: protocol::InputStyle::KanaJis as i32,
             surrounding_text: None,
+            keyboard_language: protocol::KeyboardLanguage::Japanese as i32,
         }),
     )));
     let converted = response(engine.handle(envelope(
@@ -103,6 +105,59 @@ fn forwards_explicit_kana_key_intention_and_input() {
 }
 
 #[test]
+fn completes_foreign_input_with_the_configured_hunspell_assets() {
+    let mut engine = Engine::open_with_hunspell(
+        dictionary_root(),
+        env!("BEANKEY_TEST_EN_US_DICTIONARY"),
+        env!("BEANKEY_TEST_EL_GR_DICTIONARY"),
+    )
+    .unwrap();
+    response(engine.handle(envelope(
+        1,
+        Payload::StartSession(protocol::StartSession {
+            input_style: protocol::InputStyle::Direct as i32,
+            surrounding_text: None,
+            keyboard_language: protocol::KeyboardLanguage::EnglishUs as i32,
+        }),
+    )));
+    let english = response(engine.handle(envelope(
+        2,
+        Payload::KeyEvent(protocol::KeyEvent {
+            text: "hel".into(),
+            ..Default::default()
+        }),
+    )));
+    assert!(
+        english
+            .candidates
+            .iter()
+            .any(|candidate| candidate.text.len() > 3 && candidate.text.starts_with("hel"))
+    );
+
+    response(engine.handle(envelope(
+        3,
+        Payload::StartSession(protocol::StartSession {
+            input_style: protocol::InputStyle::Direct as i32,
+            surrounding_text: None,
+            keyboard_language: protocol::KeyboardLanguage::Greek as i32,
+        }),
+    )));
+    let greek = response(engine.handle(envelope(
+        4,
+        Payload::KeyEvent(protocol::KeyEvent {
+            text: "καλ".into(),
+            ..Default::default()
+        }),
+    )));
+    assert!(
+        greek
+            .candidates
+            .iter()
+            .any(|candidate| candidate.text == "καλά")
+    );
+}
+
+#[test]
 fn isolates_sessions_and_rejects_out_of_order_requests() {
     let mut engine = Engine::open(dictionary_root()).unwrap();
     response(engine.handle(envelope(
@@ -110,6 +165,7 @@ fn isolates_sessions_and_rejects_out_of_order_requests() {
         Payload::StartSession(protocol::StartSession {
             input_style: protocol::InputStyle::Direct as i32,
             surrounding_text: None,
+            keyboard_language: protocol::KeyboardLanguage::Japanese as i32,
         }),
     )));
     let error = engine.handle(envelope(
@@ -123,6 +179,7 @@ fn isolates_sessions_and_rejects_out_of_order_requests() {
         Payload::StartSession(protocol::StartSession {
             input_style: protocol::InputStyle::Direct as i32,
             surrounding_text: None,
+            keyboard_language: protocol::KeyboardLanguage::Japanese as i32,
         }),
     );
     other.session_id = "other".into();
@@ -142,6 +199,7 @@ fn rejects_invalid_surrounding_text_and_resets_the_session() {
                 cursor: 3,
                 anchor: 0,
             }),
+            keyboard_language: protocol::KeyboardLanguage::Japanese as i32,
         }),
     ));
 
@@ -197,6 +255,7 @@ fn applies_zenz_prefix_correction_through_the_session_engine() {
         Payload::StartSession(protocol::StartSession {
             input_style: protocol::InputStyle::Direct as i32,
             surrounding_text: None,
+            keyboard_language: protocol::KeyboardLanguage::Japanese as i32,
         }),
     )));
 
@@ -231,6 +290,7 @@ fn preserves_special_candidates_after_zenz_conversion() {
         Payload::StartSession(protocol::StartSession {
             input_style: protocol::InputStyle::Direct as i32,
             surrounding_text: None,
+            keyboard_language: protocol::KeyboardLanguage::Japanese as i32,
         }),
     )));
 

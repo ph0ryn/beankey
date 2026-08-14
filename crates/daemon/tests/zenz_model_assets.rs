@@ -40,6 +40,7 @@ fn converts_with_the_fixed_zenz_model_and_llama_backend() {
         Payload::StartSession(protocol::StartSession {
             input_style: protocol::InputStyle::Direct as i32,
             surrounding_text: None,
+            keyboard_language: protocol::KeyboardLanguage::Japanese as i32,
         }),
     ));
 
@@ -112,19 +113,30 @@ flash_attention = true
             Payload::StartSession(protocol::StartSession {
                 input_style: protocol::InputStyle::Direct as i32,
                 surrounding_text: None,
+                keyboard_language: protocol::KeyboardLanguage::EnglishUs as i32,
             }),
         ),
         envelope(
             2,
             Payload::KeyEvent(protocol::KeyEvent {
-                text: "はし".into(),
+                text: "hel".into(),
                 ..Default::default()
             }),
         ),
     ] {
         write_envelope(&mut stream, &request).unwrap();
         let response = read_envelope(&mut stream).unwrap();
-        assert!(matches!(response.payload, Some(Payload::StateResponse(_))));
+        let Some(Payload::StateResponse(state)) = response.payload else {
+            panic!("server returned a protocol error");
+        };
+        if request.request_id == 2 {
+            assert!(
+                state
+                    .candidates
+                    .iter()
+                    .any(|candidate| candidate.text.len() > 3 && candidate.text.starts_with("hel"))
+            );
+        }
     }
     drop(stream);
 

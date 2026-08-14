@@ -2,11 +2,13 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
 use std::path::Path;
+use std::sync::Arc;
 
 use beankey_converter::{
     CompleteAction, ComposingCount as ConverterComposingCount, ConversionSession, DictionaryError,
-    DictionaryStore, InputModifier, InputStyle as ConverterInputStyle, InputTableId,
-    InputTableRegistry, NormalConverter, RequestOptions, SelectionError, ZenzLanguageModel,
+    DictionaryStore, ForeignCompletionProvider, HunspellCompleter, HunspellError, InputModifier,
+    InputStyle as ConverterInputStyle, InputTableId, InputTableRegistry, KeyboardLanguage,
+    NormalConverter, PredictionMode, RequestOptions, SelectionError, ZenzLanguageModel,
     ZenzVersionConfig,
 };
 use beankey_llama::LlamaError;
@@ -34,6 +36,7 @@ struct SessionState {
     last_request_id: u64,
     selected_candidate: usize,
     surrounding: SurroundingContext,
+    request_options: RequestOptions,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -52,12 +55,14 @@ pub struct Engine {
     zenz_version: ZenzVersionConfig,
     zenz_rich_candidates: bool,
     zenz_inference_limit: usize,
+    foreign_completion_provider: Option<Arc<dyn ForeignCompletionProvider>>,
 }
 
 #[derive(Debug)]
 pub enum EngineOpenError {
     Dictionary(DictionaryError),
     Llama(LlamaError),
+    Hunspell(HunspellError),
 }
 
 impl fmt::Display for EngineOpenError {
@@ -65,6 +70,7 @@ impl fmt::Display for EngineOpenError {
         match self {
             Self::Dictionary(error) => error.fmt(formatter),
             Self::Llama(error) => error.fmt(formatter),
+            Self::Hunspell(error) => error.fmt(formatter),
         }
     }
 }
@@ -74,6 +80,7 @@ impl Error for EngineOpenError {
         match self {
             Self::Dictionary(error) => Some(error),
             Self::Llama(error) => Some(error),
+            Self::Hunspell(error) => Some(error),
         }
     }
 }
@@ -90,6 +97,12 @@ impl From<LlamaError> for EngineOpenError {
     }
 }
 
+impl From<HunspellError> for EngineOpenError {
+    fn from(value: HunspellError) -> Self {
+        Self::Hunspell(value)
+    }
+}
+
 impl Engine {
     pub fn open(dictionary_path: impl AsRef<Path>) -> Result<Self, DictionaryError> {
         Ok(Self {
@@ -100,6 +113,7 @@ impl Engine {
             zenz_version: ZenzVersionConfig::default(),
             zenz_rich_candidates: false,
             zenz_inference_limit: zenz::DEFAULT_INFERENCE_LIMIT,
+            foreign_completion_provider: None,
         })
     }
 
@@ -121,6 +135,40 @@ impl Engine {
             dictionary_path,
             Box::new(LlamaModel::load(model_path, backend_directory)?),
         )?)
+    }
+
+    pub fn open_with_assets(
+        dictionary_path: impl AsRef<Path>,
+        model_path: impl AsRef<Path>,
+        backend_directory: impl AsRef<Path>,
+        english_dictionary: impl AsRef<Path>,
+        greek_dictionary: impl AsRef<Path>,
+    ) -> Result<Self, EngineOpenError> {
+        let mut engine = Self::open_with_llama(dictionary_path, model_path, backend_directory)?;
+        engine.load_hunspell(english_dictionary, greek_dictionary)?;
+        Ok(engine)
+    }
+
+    pub fn open_with_hunspell(
+        dictionary_path: impl AsRef<Path>,
+        english_dictionary: impl AsRef<Path>,
+        greek_dictionary: impl AsRef<Path>,
+    ) -> Result<Self, EngineOpenError> {
+        let mut engine = Self::open(dictionary_path)?;
+        engine.load_hunspell(english_dictionary, greek_dictionary)?;
+        Ok(engine)
+    }
+
+    fn load_hunspell(
+        &mut self,
+        english_dictionary: impl AsRef<Path>,
+        greek_dictionary: impl AsRef<Path>,
+    ) -> Result<(), HunspellError> {
+        self.foreign_completion_provider = Some(Arc::new(HunspellCompleter::open(
+            english_dictionary,
+            greek_dictionary,
+        )?));
+        Ok(())
     }
 
     pub fn handle(&mut self, envelope: protocol::Envelope) -> protocol::Envelope {
@@ -170,14 +218,32 @@ impl Engine {
                         );
                     }
                 };
+                let Some(keyboard_language) = keyboard_language(start.keyboard_language) else {
+                    return error_envelope(
+                        request_id,
+                        session_id,
+                        Code::InvalidPayload,
+                        "invalid keyboard language",
+                    );
+                };
+                let mut conversion = ConversionSession::new();
+                if let Some(provider) = &self.foreign_completion_provider {
+                    conversion.set_foreign_completion_provider(provider.clone());
+                }
                 self.sessions.insert(
                     session_id.clone(),
                     SessionState {
-                        conversion: ConversionSession::new(),
+                        conversion,
                         input_style,
                         last_request_id: request_id,
                         selected_candidate: 0,
                         surrounding,
+                        request_options: RequestOptions {
+                            foreign_prediction: PredictionMode::Automatic,
+                            keyboard_language,
+                            version_string: Some(format!("beankey {}", env!("CARGO_PKG_VERSION"))),
+                            ..RequestOptions::default()
+                        },
                     },
                 );
                 state_envelope(
@@ -456,7 +522,7 @@ impl Engine {
             })?;
             session
                 .conversion
-                .finalize_zenz_request(&converter, &self.tables, RequestOptions::default())
+                .finalize_zenz_request(&converter, &self.tables, session.request_options.clone())
                 .map_err(|error| {
                     (
                         Code::Internal,
@@ -466,7 +532,7 @@ impl Engine {
         } else {
             session
                 .conversion
-                .request(&converter, &self.tables, RequestOptions::default())
+                .request(&converter, &self.tables, session.request_options.clone())
                 .map_err(|error| {
                     (
                         Code::Internal,
@@ -529,6 +595,16 @@ fn input_style(value: i32) -> Option<ConverterInputStyle> {
         protocol::InputStyle::KanaUs => {
             Some(ConverterInputStyle::Mapped(InputTableId::DefaultKanaUs))
         }
+    }
+}
+
+fn keyboard_language(value: i32) -> Option<KeyboardLanguage> {
+    match protocol::KeyboardLanguage::try_from(value).ok()? {
+        protocol::KeyboardLanguage::Unspecified | protocol::KeyboardLanguage::Japanese => {
+            Some(KeyboardLanguage::Japanese)
+        }
+        protocol::KeyboardLanguage::EnglishUs => Some(KeyboardLanguage::EnglishUs),
+        protocol::KeyboardLanguage::Greek => Some(KeyboardLanguage::Greek),
     }
 }
 

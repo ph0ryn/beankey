@@ -13,10 +13,12 @@ fn main() {
 fn run() -> Result<(), Box<dyn Error>> {
     let config_path = parse_config_argument()?;
     let config = DaemonConfig::load(config_path)?;
-    let engine = Engine::open_with_llama(
+    let engine = Engine::open_with_assets(
         &config.dictionary,
         &config.model,
         &config.llama_backend_directory,
+        &config.hunspell.english_dictionary,
+        &config.hunspell.greek_dictionary,
     )?;
     let server = match DaemonServer::bind_from_environment(engine, &config.runtime_socket) {
         Ok(server) => server,
