@@ -36,6 +36,20 @@
           url = "https://huggingface.co/Miwa-Keita/zenz-v3.2-small-gguf/resolve/c67e03e07d215c869f591b274c1631170d3e11fe/ggml-model-Q5_K_M.gguf";
           hash = "sha256-KcIj1MIzJ7gP0T67WrJVUFekYxeZfV2jkVhP++8NtnM=";
         };
+      beankeyUpstream =
+        pkgs:
+        pkgs.fetchFromGitHub {
+          owner = "azooKey";
+          repo = "AzooKeyKanaKanjiConverter";
+          rev = "93766c46e31fa6a18b7ced49dab31337780f6f45";
+          hash = "sha256-euGFHvSc0MfXpXg+0GdwgLpCbV9NmM8B/e/wHsKrXDE=";
+        };
+      beankeyTokenizer =
+        pkgs:
+        pkgs.runCommand "beankey-zenz-tokenizer" { } ''
+          mkdir -p "$out"
+          cp -r ${beankeyUpstream pkgs}/Sources/EfficientNGram/tokenizer/. "$out/"
+        '';
     in
     {
       packages = forAllSystems (system: {
@@ -53,11 +67,13 @@
             buildInputs = [
               pkgs.hunspell
               pkgs.llama-cpp
+              pkgs.marisa
             ]
             ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.fcitx5 ];
             RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
             BEANKEY_TEST_EN_US_DICTIONARY = "${pkgs.hunspellDicts.en_US}/share/hunspell/en_US";
             BEANKEY_TEST_EL_GR_DICTIONARY = "${pkgs.hunspellDicts.el_GR}/share/hunspell/el_GR";
+            BEANKEY_TEST_ZENZ_TOKENIZER = "${beankeyTokenizer pkgs}/tokenizer.json";
           };
         }
       );
