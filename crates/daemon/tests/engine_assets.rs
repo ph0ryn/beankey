@@ -11,6 +11,12 @@ fn dictionary_root() -> PathBuf {
         .join("data/azooKey_dictionary_storage/Dictionary")
 }
 
+fn emoji_dictionary_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("data/azooKey_emoji_dictionary_storage/EmojiDictionary/emoji_all_E17.0.txt")
+}
+
 fn envelope(request_id: u64, payload: Payload) -> protocol::Envelope {
     protocol::Envelope {
         protocol_version: PROTOCOL_VERSION,
@@ -68,7 +74,8 @@ fn converts_selects_commits_and_resets_a_session() {
     )));
     assert_eq!(selected.commit, "司会");
     assert!(selected.preedit.is_empty());
-    assert!(selected.reset);
+    assert!(!selected.reset);
+    assert!(!selected.candidates.is_empty());
 
     let reset = response(engine.handle(envelope(
         4,
@@ -226,6 +233,61 @@ fn persists_forgets_and_resets_learning_through_session_requests() {
         Payload::ResetLearning(protocol::ResetLearning {}),
     )));
     assert!(!memory_path.exists());
+}
+
+#[test]
+fn offers_and_commits_emoji_post_composition_predictions() {
+    let mut engine = Engine::open_with_emoji(dictionary_root(), emoji_dictionary_path()).unwrap();
+    response(engine.handle(envelope(
+        1,
+        Payload::StartSession(protocol::StartSession {
+            input_style: protocol::InputStyle::RomanToKana as i32,
+            surrounding_text: None,
+            keyboard_language: protocol::KeyboardLanguage::Japanese as i32,
+        }),
+    )));
+    let converted = response(engine.handle(envelope(
+        2,
+        Payload::KeyEvent(protocol::KeyEvent {
+            text: "egao".into(),
+            ..Default::default()
+        }),
+    )));
+    let smile = converted
+        .candidates
+        .iter()
+        .position(|candidate| candidate.text == "笑顔")
+        .unwrap();
+    let committed = response(engine.handle(envelope(
+        3,
+        Payload::SelectCandidate(protocol::SelectCandidate {
+            index: smile as u32,
+        }),
+    )));
+    assert_eq!(committed.commit, "笑顔");
+    assert!(committed.preedit.is_empty());
+    assert!(!committed.reset);
+    assert_eq!(
+        committed.candidates[..3]
+            .iter()
+            .filter(|candidate| candidate.value == -3.0)
+            .count(),
+        3
+    );
+
+    let emoji = committed
+        .candidates
+        .iter()
+        .position(|candidate| candidate.value == -3.0)
+        .unwrap();
+    let selected = response(engine.handle(envelope(
+        4,
+        Payload::SelectCandidate(protocol::SelectCandidate {
+            index: emoji as u32,
+        }),
+    )));
+    assert!(!selected.commit.is_empty());
+    assert!(!selected.commit.is_ascii());
 }
 
 #[test]

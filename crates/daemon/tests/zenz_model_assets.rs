@@ -82,6 +82,7 @@ fn runs_the_server_executable_with_the_fixed_nixos_assets() {
             r#"
 dictionary = "{}"
 model = "{model}"
+emoji_dictionary = "{}"
 llama_backend_directory = "{backend}"
 runtime_socket = "beankey/daemon.sock"
 
@@ -95,7 +96,11 @@ batch_size = 512
 micro_batch_size = 64
 flash_attention = true
 "#,
-            dictionary_root().display()
+            dictionary_root().display(),
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join("data/azooKey_emoji_dictionary_storage/EmojiDictionary/emoji_all_E17.0.txt")
+                .display()
         ),
     )
     .unwrap();

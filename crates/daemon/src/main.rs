@@ -22,6 +22,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         &config.dictionary,
         &config.model,
         &config.llama_backend_directory,
+        &config.emoji_dictionary,
         &config.hunspell.english_dictionary,
         &config.hunspell.greek_dictionary,
         learning_directory,

@@ -9,7 +9,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::lattice::is_clause;
-use crate::{Candidate, DictionaryEntry, DictionaryMetadata};
+use crate::{
+    Candidate, DictionaryEntry, DictionaryMetadata, PostCompositionPrediction, PostPredictionKind,
+};
 
 const MAGIC: &[u8] = b"BEANKEY_MEMORY_V1\0";
 const MEMORY_FILE: &str = "memory.bin";
@@ -164,6 +166,45 @@ impl LearningMemory {
         Ok(())
     }
 
+    pub fn learn_post_prediction(
+        &self,
+        candidate: &Candidate,
+        prediction: &PostCompositionPrediction,
+    ) -> Result<(), LearningError> {
+        let mut state = self.lock()?;
+        if !state.mode.updates_memory() {
+            return Ok(());
+        }
+        let (mut prefix, update) = match &prediction.kind {
+            PostPredictionKind::Additional { entries } => {
+                (candidate.entries.clone(), entries.clone())
+            }
+            PostPredictionKind::Replacement {
+                target_entries,
+                replacement_entries,
+            } => {
+                let prefix_count = candidate.entries.len().saturating_sub(target_entries.len());
+                (
+                    candidate.entries[..prefix_count].to_vec(),
+                    replacement_entries.clone(),
+                )
+            }
+        };
+        let update_start = prefix.len();
+        prefix.extend(update.iter().cloned());
+        let today = state.today;
+        for entry in update.iter().filter(|entry| learns_individual_word(entry)) {
+            memorize(&mut state.temporary, entry.clone(), today);
+        }
+        for entry in learned_clause_entries_after(&prefix, update_start) {
+            memorize(&mut state.temporary, entry, today);
+        }
+        if prefix.len() > 1 {
+            memorize(&mut state.temporary, join_entries(&prefix), today);
+        }
+        Ok(())
+    }
+
     pub fn forget(&self, candidate: &Candidate) -> Result<(), LearningError> {
         let mut state = self.lock()?;
         if !state.mode.updates_memory() {
@@ -226,22 +267,42 @@ fn learns_individual_word(entry: &DictionaryEntry) -> bool {
 }
 
 fn learned_clause_entries(entries: &[DictionaryEntry]) -> Vec<DictionaryEntry> {
+    learned_clause_ranges(entries)
+        .windows(2)
+        .map(|pair| join_entries(&entries[pair[0].0..pair[1].1]))
+        .collect()
+}
+
+fn learned_clause_entries_after(
+    entries: &[DictionaryEntry],
+    update_start: usize,
+) -> Vec<DictionaryEntry> {
+    learned_clause_ranges(entries)
+        .windows(2)
+        .filter(|pair| pair[1].1 > update_start)
+        .map(|pair| join_entries(&entries[pair[0].0..pair[1].1]))
+        .collect()
+}
+
+fn learned_clause_ranges(entries: &[DictionaryEntry]) -> Vec<(usize, usize)> {
     let mut clauses: Vec<Vec<DictionaryEntry>> = Vec::new();
-    for entry in entries {
+    let mut ranges = Vec::new();
+    for (index, entry) in entries.iter().enumerate() {
         if clauses.last().is_none_or(|clause| {
             clause.last().is_some_and(|previous| {
                 is_clause(usize::from(previous.right_id), usize::from(entry.left_id))
             })
         }) {
             clauses.push(vec![entry.clone()]);
+            ranges.push((index, index + 1));
         } else if let Some(clause) = clauses.last_mut() {
             clause.push(entry.clone());
+            if let Some((_, end)) = ranges.last_mut() {
+                *end = index + 1;
+            }
         }
     }
-    clauses
-        .windows(2)
-        .map(|pair| join_entries(&pair.concat()))
-        .collect()
+    ranges
 }
 
 fn join_entries(entries: &[DictionaryEntry]) -> DictionaryEntry {
@@ -540,5 +601,42 @@ mod tests {
         let decoded = decode(&encode(&records)).unwrap();
         assert_eq!(decoded[0].entry.word, "単語");
         assert_eq!(decoded[0].count, 3);
+    }
+
+    #[test]
+    fn learns_only_the_new_part_of_a_post_composition_prediction() {
+        let memory = LearningMemory {
+            inner: Arc::new(Mutex::new(LearningState {
+                directory: PathBuf::new(),
+                mode: LearningMode::InputAndOutput,
+                max_count: 128,
+                today: 10,
+                persisted: Vec::new(),
+                temporary: Vec::new(),
+            })),
+        };
+        let base_entry = entry("今日", "キョウ");
+        let base = Candidate::single(
+            "今日".into(),
+            -12.0,
+            crate::ComposingCount::Surface(3),
+            501,
+            vec![base_entry],
+        );
+        let prediction = PostCompositionPrediction {
+            text: "は".into(),
+            value: -13.0,
+            kind: PostPredictionKind::Additional {
+                entries: vec![entry("は", "ハ")],
+            },
+            is_terminal: false,
+        };
+
+        memory.learn_post_prediction(&base, &prediction).unwrap();
+        let learned = memory.entries().unwrap();
+
+        assert!(learned.iter().any(|entry| entry.word == "は"));
+        assert!(learned.iter().any(|entry| entry.word == "今日は"));
+        assert!(!learned.iter().any(|entry| entry.word == "今日"));
     }
 }

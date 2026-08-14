@@ -8,8 +8,9 @@ use beankey_converter::{
     CompleteAction, ComposingCount as ConverterComposingCount, ConversionSession, DictionaryError,
     DictionaryStore, ForeignCompletionProvider, HunspellCompleter, HunspellError, InputModifier,
     InputStyle as ConverterInputStyle, InputTableId, InputTableRegistry, KeyboardLanguage,
-    LearningError, LearningMemory, LearningMode, NormalConverter, PredictionMode, RequestOptions,
-    SelectionError, ZenzLanguageModel, ZenzVersionConfig,
+    LearningError, LearningMemory, LearningMode, NormalConverter, PostCompositionPrediction,
+    PostCompositionPredictor, PredictionMode, RequestOptions, SelectionError, TextReplacer,
+    TextReplacerError, ZenzLanguageModel, ZenzVersionConfig,
 };
 use beankey_llama::LlamaError;
 
@@ -37,6 +38,8 @@ struct SessionState {
     selected_candidate: usize,
     surrounding: SurroundingContext,
     request_options: RequestOptions,
+    last_committed: Option<beankey_converter::Candidate>,
+    post_predictions: Vec<PostCompositionPrediction>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -57,6 +60,7 @@ pub struct Engine {
     zenz_inference_limit: usize,
     foreign_completion_provider: Option<Arc<dyn ForeignCompletionProvider>>,
     learning_memory: Option<LearningMemory>,
+    text_replacer: Option<TextReplacer>,
 }
 
 #[derive(Debug)]
@@ -65,6 +69,7 @@ pub enum EngineOpenError {
     Llama(LlamaError),
     Hunspell(HunspellError),
     Learning(LearningError),
+    TextReplacer(TextReplacerError),
 }
 
 impl fmt::Display for EngineOpenError {
@@ -74,6 +79,7 @@ impl fmt::Display for EngineOpenError {
             Self::Llama(error) => error.fmt(formatter),
             Self::Hunspell(error) => error.fmt(formatter),
             Self::Learning(error) => error.fmt(formatter),
+            Self::TextReplacer(error) => error.fmt(formatter),
         }
     }
 }
@@ -85,6 +91,7 @@ impl Error for EngineOpenError {
             Self::Llama(error) => Some(error),
             Self::Hunspell(error) => Some(error),
             Self::Learning(error) => Some(error),
+            Self::TextReplacer(error) => Some(error),
         }
     }
 }
@@ -113,6 +120,12 @@ impl From<LearningError> for EngineOpenError {
     }
 }
 
+impl From<TextReplacerError> for EngineOpenError {
+    fn from(value: TextReplacerError) -> Self {
+        Self::TextReplacer(value)
+    }
+}
+
 impl Engine {
     pub fn open(dictionary_path: impl AsRef<Path>) -> Result<Self, DictionaryError> {
         Ok(Self {
@@ -125,6 +138,7 @@ impl Engine {
             zenz_inference_limit: zenz::DEFAULT_INFERENCE_LIMIT,
             foreign_completion_provider: None,
             learning_memory: None,
+            text_replacer: None,
         })
     }
 
@@ -152,6 +166,7 @@ impl Engine {
         dictionary_path: impl AsRef<Path>,
         model_path: impl AsRef<Path>,
         backend_directory: impl AsRef<Path>,
+        emoji_dictionary: impl AsRef<Path>,
         english_dictionary: impl AsRef<Path>,
         greek_dictionary: impl AsRef<Path>,
         learning_directory: impl AsRef<Path>,
@@ -159,6 +174,7 @@ impl Engine {
         let mut engine = Self::open_with_llama(dictionary_path, model_path, backend_directory)?;
         engine.load_hunspell(english_dictionary, greek_dictionary)?;
         engine.load_learning(learning_directory)?;
+        engine.load_text_replacer(emoji_dictionary)?;
         Ok(engine)
     }
 
@@ -181,6 +197,15 @@ impl Engine {
         Ok(engine)
     }
 
+    pub fn open_with_emoji(
+        dictionary_path: impl AsRef<Path>,
+        emoji_dictionary: impl AsRef<Path>,
+    ) -> Result<Self, EngineOpenError> {
+        let mut engine = Self::open(dictionary_path)?;
+        engine.load_text_replacer(emoji_dictionary)?;
+        Ok(engine)
+    }
+
     fn load_hunspell(
         &mut self,
         english_dictionary: impl AsRef<Path>,
@@ -199,6 +224,14 @@ impl Engine {
             LearningMode::InputAndOutput,
             65_536,
         )?);
+        Ok(())
+    }
+
+    fn load_text_replacer(
+        &mut self,
+        emoji_dictionary: impl AsRef<Path>,
+    ) -> Result<(), TextReplacerError> {
+        self.text_replacer = Some(TextReplacer::open(emoji_dictionary)?);
         Ok(())
     }
 
@@ -285,6 +318,8 @@ impl Engine {
                             version_string: Some(format!("beankey {}", env!("CARGO_PKG_VERSION"))),
                             ..RequestOptions::default()
                         },
+                        last_committed: None,
+                        post_predictions: Vec::new(),
                     },
                 );
                 state_envelope(
@@ -349,6 +384,8 @@ impl Engine {
             Payload::ResetSession(_) => {
                 session.conversion.reset();
                 session.selected_candidate = 0;
+                session.last_committed = None;
+                session.post_predictions.clear();
                 Ok(protocol::StateResponse {
                     reset: true,
                     ..Default::default()
@@ -393,6 +430,8 @@ impl Engine {
                 let consumed = !commit.is_empty();
                 session.conversion.reset();
                 session.selected_candidate = 0;
+                session.last_committed = None;
+                session.post_predictions.clear();
                 Ok(protocol::StateResponse {
                     consumed,
                     commit,
@@ -414,6 +453,8 @@ impl Engine {
                 if let Some(session) = self.sessions.get_mut(&session_id) {
                     session.conversion.reset();
                     session.selected_candidate = 0;
+                    session.last_committed = None;
+                    session.post_predictions.clear();
                 }
                 error_envelope(request_id, session_id, code, message)
             }
@@ -428,6 +469,7 @@ impl Engine {
         if event.release {
             return Ok(make_state(session, false, String::new(), false));
         }
+        let post_candidate_count = session.post_predictions.len();
         match event.key_sym {
             KEY_BACKSPACE if !session.conversion.composing().is_empty() => {
                 session.conversion.delete_backward(1, &self.tables);
@@ -441,9 +483,13 @@ impl Engine {
             KEY_RIGHT if !session.conversion.composing().is_empty() => {
                 session.conversion.move_cursor(1);
             }
-            KEY_ESCAPE if !session.conversion.composing().is_empty() => {
+            KEY_ESCAPE
+                if !session.conversion.composing().is_empty() || post_candidate_count > 0 =>
+            {
                 session.conversion.reset();
                 session.selected_candidate = 0;
+                session.last_committed = None;
+                session.post_predictions.clear();
                 return Ok(protocol::StateResponse {
                     consumed: true,
                     reset: true,
@@ -463,6 +509,9 @@ impl Engine {
                 }
                 return self.select_candidate(session, session.selected_candidate);
             }
+            KEY_RETURN if post_candidate_count > 0 => {
+                return self.select_post_prediction(session, session.selected_candidate);
+            }
             KEY_SPACE if !session.conversion.composing().is_empty() => {
                 if !session.conversion.candidates().is_empty() {
                     session.selected_candidate =
@@ -470,8 +519,13 @@ impl Engine {
                     return Ok(make_state(session, true, String::new(), false));
                 }
             }
-            KEY_UP | KEY_DOWN if !session.conversion.candidates().is_empty() => {
-                let count = session.conversion.candidates().len();
+            KEY_SPACE if post_candidate_count > 0 => {
+                session.selected_candidate =
+                    (session.selected_candidate + 1) % post_candidate_count;
+                return Ok(make_state(session, true, String::new(), false));
+            }
+            KEY_UP | KEY_DOWN if active_candidate_count(session) > 0 => {
+                let count = active_candidate_count(session);
                 session.selected_candidate = if event.key_sym == KEY_UP {
                     session
                         .selected_candidate
@@ -483,6 +537,8 @@ impl Engine {
                 return Ok(make_state(session, true, String::new(), false));
             }
             _ if !event.text.is_empty() => {
+                session.last_committed = None;
+                session.post_predictions.clear();
                 if matches!(session.input_style, ConverterInputStyle::Mapped(_)) {
                     let input = if event.input.is_empty() {
                         event.text.clone()
@@ -506,6 +562,11 @@ impl Engine {
                     );
                 }
             }
+            _ if post_candidate_count > 0 => {
+                session.last_committed = None;
+                session.post_predictions.clear();
+                return Ok(make_state(session, false, String::new(), true));
+            }
             _ => return Ok(make_state(session, false, String::new(), false)),
         }
 
@@ -521,6 +582,20 @@ impl Engine {
         session: &mut SessionState,
         index: usize,
     ) -> SessionRequestResult<protocol::StateResponse> {
+        if session.conversion.composing().is_empty() && !session.post_predictions.is_empty() {
+            return self.select_post_prediction(session, index);
+        }
+        let selected = session
+            .conversion
+            .candidates()
+            .get(index)
+            .cloned()
+            .ok_or_else(|| {
+                (
+                    Code::InvalidPayload,
+                    format!("candidate index {index} is outside the current candidates"),
+                )
+            })?;
         let commit = session
             .conversion
             .select_candidate(index, &self.tables)
@@ -542,14 +617,86 @@ impl Engine {
         })?;
         session.selected_candidate = 0;
         if !session.conversion.composing().is_empty() {
+            session.last_committed = None;
+            session.post_predictions.clear();
             self.request_candidates(session)?;
+        } else {
+            session.last_committed = Some(selected.clone());
+            session.post_predictions = self.request_post_predictions(&selected)?;
         }
-        Ok(make_state(
-            session,
-            true,
-            commit,
-            session.conversion.composing().is_empty(),
-        ))
+        let reset =
+            session.post_predictions.is_empty() && session.conversion.composing().is_empty();
+        Ok(make_state(session, true, commit, reset))
+    }
+
+    fn select_post_prediction(
+        &mut self,
+        session: &mut SessionState,
+        index: usize,
+    ) -> SessionRequestResult<protocol::StateResponse> {
+        let prediction = session
+            .post_predictions
+            .get(index)
+            .cloned()
+            .ok_or_else(|| {
+                (
+                    Code::InvalidPayload,
+                    format!(
+                        "post-composition candidate index {index} is outside the current candidates"
+                    ),
+                )
+            })?;
+        let previous = session.last_committed.as_ref().ok_or_else(|| {
+            (
+                Code::Internal,
+                "post-composition prediction has no committed candidate".into(),
+            )
+        })?;
+        let joined = prediction.join(previous);
+        if let Some(memory) = &self.learning_memory {
+            memory
+                .learn_post_prediction(previous, &prediction)
+                .map_err(|error| {
+                    (
+                        Code::Internal,
+                        format!("post-composition learning failed: {error}"),
+                    )
+                })?;
+            memory.commit().map_err(|error| {
+                (
+                    Code::Internal,
+                    format!("post-composition learning commit failed: {error}"),
+                )
+            })?;
+        }
+        session.selected_candidate = 0;
+        session.last_committed = Some(joined.clone());
+        session.post_predictions = if prediction.is_terminal {
+            Vec::new()
+        } else {
+            self.request_post_predictions(&joined)?
+        };
+        let reset = session.post_predictions.is_empty();
+        Ok(make_state(session, true, prediction.text, reset))
+    }
+
+    fn request_post_predictions(
+        &self,
+        candidate: &beankey_converter::Candidate,
+    ) -> SessionRequestResult<Vec<PostCompositionPrediction>> {
+        let predictions = match &self.text_replacer {
+            Some(replacer) => {
+                PostCompositionPredictor::with_text_replacer(&self.dictionary, replacer)
+                    .predict(candidate)
+            }
+            None => PostCompositionPredictor::new(&self.dictionary).predict(candidate),
+        };
+        predictions.map_err(|error| {
+            (
+                Code::Internal,
+                format!("post-composition prediction failed: {error}"),
+            )
+        })
     }
 
     fn forget_candidate(
@@ -713,7 +860,7 @@ fn keyboard_language(value: i32) -> Option<KeyboardLanguage> {
 }
 
 fn page_candidates(session: &mut SessionState, page: protocol::PageCandidates) -> bool {
-    let count = session.conversion.candidates().len();
+    let count = active_candidate_count(session);
     if page.page_size == 0 {
         return false;
     }
@@ -734,6 +881,14 @@ fn page_candidates(session: &mut SessionState, page: protocol::PageCandidates) -
     true
 }
 
+fn active_candidate_count(session: &SessionState) -> usize {
+    if session.conversion.composing().is_empty() && !session.post_predictions.is_empty() {
+        session.post_predictions.len()
+    } else {
+        session.conversion.candidates().len()
+    }
+}
+
 fn make_state(
     session: &SessionState,
     consumed: bool,
@@ -744,15 +899,34 @@ fn make_state(
         consumed,
         preedit: session.conversion.composing().surface(),
         preedit_cursor: session.conversion.composing().cursor() as u32,
-        candidates: session
-            .conversion
-            .candidates()
-            .iter()
-            .map(candidate_to_protocol)
-            .collect(),
+        candidates: if session.conversion.composing().is_empty()
+            && !session.post_predictions.is_empty()
+        {
+            session
+                .post_predictions
+                .iter()
+                .map(post_prediction_to_protocol)
+                .collect()
+        } else {
+            session
+                .conversion
+                .candidates()
+                .iter()
+                .map(candidate_to_protocol)
+                .collect()
+        },
         selected_candidate: session.selected_candidate as i32,
         commit,
         reset,
+    }
+}
+
+fn post_prediction_to_protocol(prediction: &PostCompositionPrediction) -> protocol::Candidate {
+    protocol::Candidate {
+        text: prediction.text.clone(),
+        value: prediction.value,
+        composing_count: None,
+        actions: Vec::new(),
     }
 }
 
