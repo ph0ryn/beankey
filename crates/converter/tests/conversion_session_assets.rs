@@ -52,3 +52,24 @@ fn partially_commits_the_first_clause_and_converts_the_remainder() {
     let remaining = session.request_candidates(&converter, &tables, 10).unwrap();
     assert!(remaining.iter().any(|candidate| candidate.text == "猫"));
 }
+
+#[test]
+fn selects_the_best_exact_candidate_for_live_conversion() {
+    let dictionary = DictionaryStore::open(dictionary_root()).unwrap();
+    let converter = NormalConverter::new(&dictionary);
+    let tables = InputTableRegistry::new();
+    let mut session = ConversionSession::new();
+    session.insert_str("かなかんじへんかん", InputStyle::Direct, &tables);
+
+    let live = session
+        .request_live_conversion(&converter, &tables)
+        .unwrap()
+        .expect("live conversion candidate");
+    let normal = session
+        .request_candidates(&converter, &tables, 1)
+        .unwrap()
+        .first()
+        .expect("normal conversion candidate");
+    assert_eq!(live.text, normal.text);
+    assert_eq!(live.composing_count, normal.composing_count);
+}
