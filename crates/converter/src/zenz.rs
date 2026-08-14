@@ -11,6 +11,65 @@ const RIGHT_CONTEXT_TAG: char = '\u{EE07}';
 pub const ALIGNMENT_SEPARATOR: char = '\u{EE08}';
 
 #[derive(Clone, Debug, Default, Eq, Hash, PartialEq)]
+pub struct PrefixConstraint {
+    pub bytes: Vec<u8>,
+    pub has_eos: bool,
+    pub ignore_memory_and_user_dictionary: bool,
+}
+
+impl PrefixConstraint {
+    pub fn new(bytes: Vec<u8>) -> Self {
+        Self {
+            bytes,
+            ..Self::default()
+        }
+    }
+
+    pub fn normalized(
+        bytes: Vec<u8>,
+        default_has_eos: bool,
+        ignore_memory_and_user_dictionary: bool,
+    ) -> Self {
+        let separator = ALIGNMENT_SEPARATOR.to_string().into_bytes();
+        let alignment = bytes
+            .windows(separator.len())
+            .position(|window| window == separator);
+        match alignment {
+            Some(index) => Self {
+                bytes: bytes[..index].to_vec(),
+                has_eos: true,
+                ignore_memory_and_user_dictionary,
+            },
+            None => Self {
+                bytes,
+                has_eos: default_has_eos,
+                ignore_memory_and_user_dictionary,
+            },
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.bytes.is_empty() && !self.has_eos
+    }
+
+    pub(crate) fn can_continue(&self, candidate: &[u8]) -> bool {
+        if self.has_eos {
+            candidate.len() <= self.bytes.len() && self.bytes.starts_with(candidate)
+        } else {
+            self.bytes.starts_with(candidate) || candidate.starts_with(&self.bytes)
+        }
+    }
+
+    pub(crate) fn is_satisfied_by(&self, candidate: &[u8]) -> bool {
+        if self.has_eos {
+            candidate == self.bytes
+        } else {
+            candidate.starts_with(&self.bytes)
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, Hash, PartialEq)]
 pub struct ZenzV2Config {
     pub profile: Option<String>,
     pub left_context: Option<String>,
@@ -293,5 +352,14 @@ mod tests {
             ),
             "\u{EE07}ab\u{EE00}ハシ\u{EE01}"
         );
+    }
+
+    #[test]
+    fn alignment_separator_turns_a_prefix_into_an_eos_constraint() {
+        let constraint =
+            PrefixConstraint::normalized("橋\u{EE08}ignored".as_bytes().to_vec(), false, true);
+        assert_eq!(constraint.bytes, "橋".as_bytes());
+        assert!(constraint.has_eos);
+        assert!(constraint.ignore_memory_and_user_dictionary);
     }
 }

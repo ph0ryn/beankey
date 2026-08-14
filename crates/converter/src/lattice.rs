@@ -4,8 +4,8 @@ use std::sync::Arc;
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::{
-    ComposingCount, ComposingText, DictionaryEntry, DictionaryError, DictionaryStore,
-    InputTableRegistry,
+    ComposingCount, ComposingText, DictionaryEntry, DictionaryError, DictionaryMetadata,
+    DictionaryStore, InputTableRegistry, PrefixConstraint,
 };
 
 const BOS_CLASS_ID: usize = 0;
@@ -329,6 +329,12 @@ struct LatticeNode {
     predecessors: Vec<Predecessor>,
 }
 
+struct ConversionModifiers<'a> {
+    additional_entries: &'a [DictionaryEntry],
+    need_typo_correction: bool,
+    constraint: Option<&'a PrefixConstraint>,
+}
+
 pub struct NormalConverter<'a> {
     dictionary: &'a DictionaryStore,
 }
@@ -367,6 +373,27 @@ impl<'a> NormalConverter<'a> {
         self.convert_with_entries_and_typo(composing, tables, n_best, context, &[], true)
     }
 
+    pub fn convert_with_prefix_constraint(
+        &self,
+        composing: &ComposingText,
+        tables: &InputTableRegistry,
+        n_best: usize,
+        context: ConversionContext,
+        constraint: &PrefixConstraint,
+    ) -> Result<Vec<Candidate>, DictionaryError> {
+        self.convert_with_entries_typo_and_constraint(
+            composing,
+            tables,
+            n_best,
+            context,
+            ConversionModifiers {
+                additional_entries: &[],
+                need_typo_correction: false,
+                constraint: Some(constraint),
+            },
+        )
+    }
+
     pub(crate) fn convert_with_entries(
         &self,
         composing: &ComposingText,
@@ -393,6 +420,27 @@ impl<'a> NormalConverter<'a> {
         context: ConversionContext,
         additional_entries: &[DictionaryEntry],
         need_typo_correction: bool,
+    ) -> Result<Vec<Candidate>, DictionaryError> {
+        self.convert_with_entries_typo_and_constraint(
+            composing,
+            tables,
+            n_best,
+            context,
+            ConversionModifiers {
+                additional_entries,
+                need_typo_correction,
+                constraint: None,
+            },
+        )
+    }
+
+    fn convert_with_entries_typo_and_constraint(
+        &self,
+        composing: &ComposingText,
+        tables: &InputTableRegistry,
+        n_best: usize,
+        context: ConversionContext,
+        modifiers: ConversionModifiers<'_>,
     ) -> Result<Vec<Candidate>, DictionaryError> {
         if n_best == 0 || composing.is_empty() {
             return Ok(Vec::new());
@@ -438,7 +486,7 @@ impl<'a> NormalConverter<'a> {
                     surface_nodes[start].push(node_index);
                 }
             }
-            for entry in additional_entries {
+            for entry in modifiers.additional_entries {
                 let ruby_count = UnicodeSegmentation::graphemes(entry.ruby.as_str(), true).count();
                 if ruby_count == 0
                     || ruby_count > MAXIMUM_DICTIONARY_LENGTH
@@ -468,7 +516,7 @@ impl<'a> NormalConverter<'a> {
             }
         }
 
-        if need_typo_correction {
+        if modifiers.need_typo_correction {
             for (start, start_nodes) in input_nodes.iter_mut().enumerate() {
                 for prefix in crate::typo::typo_prefixes(
                     &composing.input()[start..],
@@ -477,7 +525,8 @@ impl<'a> NormalConverter<'a> {
                 ) {
                     let mut entries = self.dictionary.exact_match(&prefix.ruby)?;
                     entries.extend(
-                        additional_entries
+                        modifiers
+                            .additional_entries
                             .iter()
                             .filter(|entry| entry.ruby == prefix.ruby)
                             .cloned(),
@@ -538,19 +587,30 @@ impl<'a> NormalConverter<'a> {
                         0.0
                     };
                     let total = predecessor.total + entry.value() + head_connection;
-                    completed.push(Arc::new(RegisteredPath {
+                    let completed_path = Arc::new(RegisteredPath {
                         entry: entry.clone(),
                         range,
                         previous: predecessor.path,
                         total,
-                    }));
+                    });
+                    if modifiers.constraint.is_none_or(|constraint| {
+                        !enforces_constraint(constraint, &entry)
+                            || path_can_continue(&completed_path, constraint)
+                    }) {
+                        completed.push(completed_path);
+                    }
                 }
 
                 let next_index = index_map.dual(range.end());
                 if next_index.surface() == Some(surface_count)
                     || next_index.input() == Some(composing.input().len())
                 {
-                    results.extend(completed);
+                    results.extend(completed.into_iter().filter(|path| {
+                        modifiers.constraint.is_none_or(|constraint| {
+                            !enforces_constraint(constraint, &entry)
+                                || path_satisfies(path, constraint)
+                        })
+                    }));
                     continue;
                 }
                 let mut next_nodes: Vec<usize> = Vec::new();
@@ -566,6 +626,16 @@ impl<'a> NormalConverter<'a> {
                         usize::from(nodes[next_node_index].entry.left_id),
                     )?;
                     for path in &completed {
+                        if modifiers.constraint.is_some_and(|constraint| {
+                            enforces_constraint(constraint, &nodes[next_node_index].entry)
+                                && !path_and_word_can_continue(
+                                    path,
+                                    &nodes[next_node_index].entry.word,
+                                    constraint,
+                                )
+                        }) {
+                            continue;
+                        }
                         insert_predecessor(
                             &mut nodes[next_node_index].predecessors,
                             Predecessor {
@@ -1214,6 +1284,44 @@ fn to_katakana(value: &str) -> String {
             _ => character,
         })
         .collect()
+}
+
+fn enforces_constraint(constraint: &PrefixConstraint, entry: &DictionaryEntry) -> bool {
+    !constraint.ignore_memory_and_user_dictionary
+        && !entry.metadata.contains(DictionaryMetadata::LEARNED)
+        && !entry.metadata.contains(DictionaryMetadata::USER_DICTIONARY)
+}
+
+fn path_bytes(path: &Arc<RegisteredPath>) -> Vec<u8> {
+    let mut paths = Vec::new();
+    let mut cursor = Some(Arc::clone(path));
+    while let Some(current) = cursor {
+        paths.push(Arc::clone(&current));
+        cursor = current.previous.clone();
+    }
+    paths.reverse();
+    paths
+        .iter()
+        .flat_map(|path| path.entry.word.bytes())
+        .collect()
+}
+
+fn path_can_continue(path: &Arc<RegisteredPath>, constraint: &PrefixConstraint) -> bool {
+    constraint.can_continue(&path_bytes(path))
+}
+
+fn path_and_word_can_continue(
+    path: &Arc<RegisteredPath>,
+    word: &str,
+    constraint: &PrefixConstraint,
+) -> bool {
+    let mut bytes = path_bytes(path);
+    bytes.extend_from_slice(word.as_bytes());
+    constraint.can_continue(&bytes)
+}
+
+fn path_satisfies(path: &Arc<RegisteredPath>, constraint: &PrefixConstraint) -> bool {
+    constraint.is_satisfied_by(&path_bytes(path))
 }
 
 fn to_hiragana(value: &str) -> String {

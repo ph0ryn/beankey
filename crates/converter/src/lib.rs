@@ -37,5 +37,6 @@ pub use special::{special_candidates, typographical_candidates};
 pub use template::expand_templates;
 pub use text_replacer::{ReplacementCandidate, TextReplacer, TextReplacerError, TextSearchResult};
 pub use zenz::{
-    ALIGNMENT_SEPARATOR, ZenzPromptBuilder, ZenzV2Config, ZenzV3Config, ZenzVersionConfig,
+    ALIGNMENT_SEPARATOR, PrefixConstraint, ZenzPromptBuilder, ZenzV2Config, ZenzV3Config,
+    ZenzVersionConfig,
 };
