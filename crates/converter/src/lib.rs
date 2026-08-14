@@ -3,6 +3,7 @@ mod foreign;
 mod input;
 mod lattice;
 mod learning;
+mod lm_typo;
 mod post_prediction;
 mod session;
 mod special;
@@ -26,6 +27,7 @@ pub use input::{
 };
 pub use lattice::{Candidate, CompleteAction, ConversionContext, LatticeRange, NormalConverter};
 pub use learning::{LearningError, LearningMemory, LearningMode};
+pub use lm_typo::{LmTypoCandidate, LmTypoConfig, experimental_typo_correction};
 pub use post_prediction::{
     PostCompositionPrediction, PostCompositionPredictor, PostPredictionKind,
 };
