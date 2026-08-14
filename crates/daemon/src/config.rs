@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
 use std::fs;
@@ -18,7 +19,17 @@ pub struct DaemonConfig {
     pub llama_backend_directory: PathBuf,
     pub runtime_socket: PathBuf,
     pub hunspell: HunspellConfig,
+    pub conversion: ConversionConfig,
     pub inference: InferenceConfig,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ConversionConfig {
+    pub user_dictionary: Option<PathBuf>,
+    pub user_dictionary_directory: Option<PathBuf>,
+    #[serde(default)]
+    pub custom_input_tables: BTreeMap<String, PathBuf>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -125,6 +136,9 @@ runtime_socket = "beankey/daemon.sock"
 [hunspell]
 english_dictionary = "/nix/store/en_US"
 greek_dictionary = "/nix/store/el_GR"
+
+[conversion]
+custom_input_tables = {}
 
 [inference]
 context_size = 512

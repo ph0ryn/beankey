@@ -58,6 +58,10 @@ impl InputTableRegistry {
         self.custom.insert(name.into(), table);
     }
 
+    pub fn contains(&self, name: &str) -> bool {
+        self.custom.contains_key(name)
+    }
+
     pub(crate) fn resolve(&self, style: &InputStyle) -> Option<&InputTable> {
         match style {
             InputStyle::Direct => None,

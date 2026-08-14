@@ -79,6 +79,7 @@ dependencies = [
  "prost",
  "prost-build",
  "serde",
+ "serde_json",
  "tempfile",
  "toml",
 ]

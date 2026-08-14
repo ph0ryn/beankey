@@ -1,19 +1,23 @@
 use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
-use std::path::Path;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use beankey_converter::{
-    CompleteAction, ComposingCount as ConverterComposingCount, ConversionSession, DictionaryError,
-    DictionaryStore, ForeignCompletionProvider, HunspellCompleter, HunspellError, InputModifier,
-    InputStyle as ConverterInputStyle, InputTableId, InputTableRegistry, KeyboardLanguage,
-    LearningError, LearningMemory, LearningMode, NormalConverter, PostCompositionPrediction,
-    PostCompositionPredictor, PredictionMode, RequestOptions, SelectionError, TextReplacer,
-    TextReplacerError, ZenzLanguageModel, ZenzVersionConfig,
+    CompleteAction, ComposingCount as ConverterComposingCount, ConversionSession, DictionaryEntry,
+    DictionaryError, DictionaryMetadata, DictionaryStore, ForeignCompletionProvider, FormatReport,
+    HunspellCompleter, HunspellError, InputModifier, InputStyle as ConverterInputStyle, InputTable,
+    InputTableId, InputTableRegistry, KeyboardLanguage, LearningError, LearningMemory,
+    LearningMode, NormalConverter, PostCompositionPrediction, PostCompositionPredictor,
+    PredictionMode, RequestOptions, SelectionError, TextReplacer, TextReplacerError,
+    ZenzLanguageModel, ZenzVersionConfig,
 };
 use beankey_llama::LlamaError;
+use serde::Deserialize;
 
+use crate::config::{ConversionConfig, DaemonConfig};
 use crate::protocol::composing_count::Count;
 use crate::protocol::envelope::Payload;
 use crate::protocol::protocol_error::Code;
@@ -61,6 +65,8 @@ pub struct Engine {
     foreign_completion_provider: Option<Arc<dyn ForeignCompletionProvider>>,
     learning_memory: Option<LearningMemory>,
     text_replacer: Option<TextReplacer>,
+    user_dictionary: Vec<DictionaryEntry>,
+    user_dictionary_directory: Option<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -70,6 +76,7 @@ pub enum EngineOpenError {
     Hunspell(HunspellError),
     Learning(LearningError),
     TextReplacer(TextReplacerError),
+    ConversionResource(ConversionResourceError),
 }
 
 impl fmt::Display for EngineOpenError {
@@ -80,6 +87,7 @@ impl fmt::Display for EngineOpenError {
             Self::Hunspell(error) => error.fmt(formatter),
             Self::Learning(error) => error.fmt(formatter),
             Self::TextReplacer(error) => error.fmt(formatter),
+            Self::ConversionResource(error) => error.fmt(formatter),
         }
     }
 }
@@ -92,6 +100,7 @@ impl Error for EngineOpenError {
             Self::Hunspell(error) => Some(error),
             Self::Learning(error) => Some(error),
             Self::TextReplacer(error) => Some(error),
+            Self::ConversionResource(error) => Some(error),
         }
     }
 }
@@ -126,6 +135,59 @@ impl From<TextReplacerError> for EngineOpenError {
     }
 }
 
+impl From<ConversionResourceError> for EngineOpenError {
+    fn from(value: ConversionResourceError) -> Self {
+        Self::ConversionResource(value)
+    }
+}
+
+#[derive(Debug)]
+pub enum ConversionResourceError {
+    Read {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    UserDictionary(serde_json::Error),
+    InvalidInputTable {
+        name: String,
+    },
+    Dictionary(DictionaryError),
+}
+
+impl fmt::Display for ConversionResourceError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Read { path, source } => {
+                write!(formatter, "failed to read {}: {source}", path.display())
+            }
+            Self::UserDictionary(error) => write!(formatter, "invalid user dictionary: {error}"),
+            Self::InvalidInputTable { name } => write!(formatter, "invalid input table {name}"),
+            Self::Dictionary(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl Error for ConversionResourceError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Read { source, .. } => Some(source),
+            Self::UserDictionary(error) => Some(error),
+            Self::Dictionary(error) => Some(error),
+            Self::InvalidInputTable { .. } => None,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UserDictionaryItem {
+    word: String,
+    reading: String,
+    #[serde(default)]
+    #[serde(rename = "hint")]
+    _hint: Option<String>,
+}
+
 impl Engine {
     pub fn open(dictionary_path: impl AsRef<Path>) -> Result<Self, DictionaryError> {
         Ok(Self {
@@ -139,6 +201,8 @@ impl Engine {
             foreign_completion_provider: None,
             learning_memory: None,
             text_replacer: None,
+            user_dictionary: Vec::new(),
+            user_dictionary_directory: None,
         })
     }
 
@@ -162,19 +226,22 @@ impl Engine {
         )?)
     }
 
-    pub fn open_with_assets(
-        dictionary_path: impl AsRef<Path>,
-        model_path: impl AsRef<Path>,
-        backend_directory: impl AsRef<Path>,
-        emoji_dictionary: impl AsRef<Path>,
-        english_dictionary: impl AsRef<Path>,
-        greek_dictionary: impl AsRef<Path>,
+    pub fn open_with_config(
+        config: &DaemonConfig,
         learning_directory: impl AsRef<Path>,
     ) -> Result<Self, EngineOpenError> {
-        let mut engine = Self::open_with_llama(dictionary_path, model_path, backend_directory)?;
-        engine.load_hunspell(english_dictionary, greek_dictionary)?;
+        let mut engine = Self::open_with_llama(
+            &config.dictionary,
+            &config.model,
+            &config.llama_backend_directory,
+        )?;
+        engine.load_hunspell(
+            &config.hunspell.english_dictionary,
+            &config.hunspell.greek_dictionary,
+        )?;
         engine.load_learning(learning_directory)?;
-        engine.load_text_replacer(emoji_dictionary)?;
+        engine.load_text_replacer(&config.emoji_dictionary)?;
+        engine.load_conversion_resources(&config.conversion)?;
         Ok(engine)
     }
 
@@ -203,6 +270,15 @@ impl Engine {
     ) -> Result<Self, EngineOpenError> {
         let mut engine = Self::open(dictionary_path)?;
         engine.load_text_replacer(emoji_dictionary)?;
+        Ok(engine)
+    }
+
+    pub fn open_with_conversion_resources(
+        dictionary_path: impl AsRef<Path>,
+        conversion: &ConversionConfig,
+    ) -> Result<Self, EngineOpenError> {
+        let mut engine = Self::open(dictionary_path)?;
+        engine.load_conversion_resources(conversion)?;
         Ok(engine)
     }
 
@@ -235,6 +311,57 @@ impl Engine {
         Ok(())
     }
 
+    fn load_conversion_resources(
+        &mut self,
+        conversion: &ConversionConfig,
+    ) -> Result<(), ConversionResourceError> {
+        if let Some(path) = &conversion.user_dictionary {
+            let source =
+                fs::read_to_string(path).map_err(|source| ConversionResourceError::Read {
+                    path: path.clone(),
+                    source,
+                })?;
+            let items: Vec<UserDictionaryItem> =
+                serde_json::from_str(&source).map_err(ConversionResourceError::UserDictionary)?;
+            self.user_dictionary = items
+                .into_iter()
+                .map(|item| DictionaryEntry {
+                    word: item.word,
+                    ruby: to_katakana(&item.reading),
+                    left_id: 1288,
+                    right_id: 1288,
+                    meaning_id: 501,
+                    base_value: -10.0,
+                    adjustment: 0.0,
+                    metadata: DictionaryMetadata::USER_DICTIONARY,
+                })
+                .collect();
+        }
+        if let Some(path) = &conversion.user_dictionary_directory {
+            beankey_converter::UserDictionary::open(path.clone())
+                .map_err(ConversionResourceError::Dictionary)?;
+            self.user_dictionary_directory = Some(path.clone());
+        }
+        for (name, path) in &conversion.custom_input_tables {
+            let source =
+                fs::read_to_string(path).map_err(|source| ConversionResourceError::Read {
+                    path: path.clone(),
+                    source,
+                })?;
+            if name.is_empty()
+                || !matches!(
+                    InputTable::check_custom_tsv(&source),
+                    FormatReport::FullyValid
+                )
+            {
+                return Err(ConversionResourceError::InvalidInputTable { name: name.clone() });
+            }
+            self.tables
+                .register(name.clone(), InputTable::from_custom_tsv(&source));
+        }
+        Ok(())
+    }
+
     pub fn handle(&mut self, envelope: protocol::Envelope) -> protocol::Envelope {
         let request_id = envelope.request_id;
         let session_id = envelope.session_id.clone();
@@ -263,7 +390,9 @@ impl Engine {
                         "request ID is not greater than the previous request",
                     );
                 }
-                let Some(input_style) = input_style(start.input_style) else {
+                let Some(input_style) =
+                    input_style(start.input_style, &start.custom_input_table, &self.tables)
+                else {
                     return error_envelope(
                         request_id,
                         session_id,
@@ -291,6 +420,17 @@ impl Engine {
                     );
                 };
                 let mut conversion = ConversionSession::new();
+                conversion.import_dynamic_user_dictionary(self.user_dictionary.clone(), Vec::new());
+                if let Some(path) = &self.user_dictionary_directory
+                    && let Err(error) = conversion.update_user_dictionary_path(path.clone())
+                {
+                    return error_envelope(
+                        request_id,
+                        session_id,
+                        Code::Internal,
+                        format!("user dictionary initialization failed: {error}"),
+                    );
+                }
                 if let Some(provider) = &self.foreign_completion_provider {
                     conversion.set_foreign_completion_provider(provider.clone());
                 }
@@ -539,7 +679,9 @@ impl Engine {
             _ if !event.text.is_empty() => {
                 session.last_committed = None;
                 session.post_predictions.clear();
-                if matches!(session.input_style, ConverterInputStyle::Mapped(_)) {
+                if matches!(session.input_style, ConverterInputStyle::Mapped(_))
+                    && (!event.input.is_empty() || !event.intention.is_empty())
+                {
                     let input = if event.input.is_empty() {
                         event.text.clone()
                     } else {
@@ -834,7 +976,11 @@ fn version_with_context(
     }
 }
 
-fn input_style(value: i32) -> Option<ConverterInputStyle> {
+fn input_style(
+    value: i32,
+    custom_table: &str,
+    tables: &InputTableRegistry,
+) -> Option<ConverterInputStyle> {
     match protocol::InputStyle::try_from(value).ok()? {
         protocol::InputStyle::Unspecified => None,
         protocol::InputStyle::Direct => Some(ConverterInputStyle::Direct),
@@ -846,6 +992,9 @@ fn input_style(value: i32) -> Option<ConverterInputStyle> {
         protocol::InputStyle::KanaUs => {
             Some(ConverterInputStyle::Mapped(InputTableId::DefaultKanaUs))
         }
+        protocol::InputStyle::Custom => tables
+            .contains(custom_table)
+            .then(|| ConverterInputStyle::Mapped(InputTableId::Named(custom_table.into()))),
     }
 }
 
@@ -857,6 +1006,18 @@ fn keyboard_language(value: i32) -> Option<KeyboardLanguage> {
         protocol::KeyboardLanguage::EnglishUs => Some(KeyboardLanguage::EnglishUs),
         protocol::KeyboardLanguage::Greek => Some(KeyboardLanguage::Greek),
     }
+}
+
+fn to_katakana(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| match character {
+            '\u{3041}'..='\u{3096}' => {
+                char::from_u32(u32::from(character) + 96).expect("katakana scalar is valid")
+            }
+            _ => character,
+        })
+        .collect()
 }
 
 fn page_candidates(session: &mut SessionState, page: protocol::PageCandidates) -> bool {

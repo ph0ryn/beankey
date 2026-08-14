@@ -1,8 +1,11 @@
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use beankey_converter::{ZenzInferenceError, ZenzLanguageModel};
 use beankey_daemon::protocol::envelope::Payload;
-use beankey_daemon::{Engine, PROTOCOL_VERSION, protocol};
+use beankey_daemon::{
+    ConversionConfig, ConversionResourceError, Engine, EngineOpenError, PROTOCOL_VERSION, protocol,
+};
 use tempfile::TempDir;
 
 fn dictionary_root() -> PathBuf {
@@ -44,6 +47,7 @@ fn converts_selects_commits_and_resets_a_session() {
             input_style: protocol::InputStyle::RomanToKana as i32,
             surrounding_text: None,
             keyboard_language: protocol::KeyboardLanguage::Japanese as i32,
+            custom_input_table: String::new(),
         }),
     )));
     let converted = response(engine.handle(envelope(
@@ -94,6 +98,7 @@ fn forwards_explicit_kana_key_intention_and_input() {
             input_style: protocol::InputStyle::KanaJis as i32,
             surrounding_text: None,
             keyboard_language: protocol::KeyboardLanguage::Japanese as i32,
+            custom_input_table: String::new(),
         }),
     )));
     let converted = response(engine.handle(envelope(
@@ -126,6 +131,7 @@ fn completes_foreign_input_with_the_configured_hunspell_assets() {
             input_style: protocol::InputStyle::Direct as i32,
             surrounding_text: None,
             keyboard_language: protocol::KeyboardLanguage::EnglishUs as i32,
+            custom_input_table: String::new(),
         }),
     )));
     let english = response(engine.handle(envelope(
@@ -148,6 +154,7 @@ fn completes_foreign_input_with_the_configured_hunspell_assets() {
             input_style: protocol::InputStyle::Direct as i32,
             surrounding_text: None,
             keyboard_language: protocol::KeyboardLanguage::Greek as i32,
+            custom_input_table: String::new(),
         }),
     )));
     let greek = response(engine.handle(envelope(
@@ -175,6 +182,7 @@ fn persists_forgets_and_resets_learning_through_session_requests() {
             input_style: protocol::InputStyle::RomanToKana as i32,
             surrounding_text: None,
             keyboard_language: protocol::KeyboardLanguage::Japanese as i32,
+            custom_input_table: String::new(),
         }),
     )));
     let converted = response(engine.handle(envelope(
@@ -206,6 +214,7 @@ fn persists_forgets_and_resets_learning_through_session_requests() {
             input_style: protocol::InputStyle::RomanToKana as i32,
             surrounding_text: None,
             keyboard_language: protocol::KeyboardLanguage::Japanese as i32,
+            custom_input_table: String::new(),
         }),
     )));
     let converted = response(restarted.handle(envelope(
@@ -244,6 +253,7 @@ fn offers_and_commits_emoji_post_composition_predictions() {
             input_style: protocol::InputStyle::RomanToKana as i32,
             surrounding_text: None,
             keyboard_language: protocol::KeyboardLanguage::Japanese as i32,
+            custom_input_table: String::new(),
         }),
     )));
     let converted = response(engine.handle(envelope(
@@ -291,6 +301,78 @@ fn offers_and_commits_emoji_post_composition_predictions() {
 }
 
 #[test]
+fn uses_a_json_user_dictionary_with_a_named_custom_input_table() {
+    let resources = TempDir::new().unwrap();
+    let user_dictionary = resources.path().join("user.json");
+    let input_table = resources.path().join("greeting.tsv");
+    std::fs::write(
+        &user_dictionary,
+        r#"[{"word":"挨拶語","reading":"あいさつ","hint":"test"}]"#,
+    )
+    .unwrap();
+    std::fs::write(&input_table, "qq\tあいさつ\n").unwrap();
+    let mut engine = Engine::open_with_conversion_resources(
+        dictionary_root(),
+        &ConversionConfig {
+            user_dictionary: Some(user_dictionary),
+            user_dictionary_directory: None,
+            custom_input_tables: BTreeMap::from([("greeting".into(), input_table)]),
+        },
+    )
+    .unwrap();
+    response(engine.handle(envelope(
+        1,
+        Payload::StartSession(protocol::StartSession {
+            input_style: protocol::InputStyle::Custom as i32,
+            surrounding_text: None,
+            keyboard_language: protocol::KeyboardLanguage::Japanese as i32,
+            custom_input_table: "greeting".into(),
+        }),
+    )));
+
+    let converted = response(engine.handle(envelope(
+        2,
+        Payload::KeyEvent(protocol::KeyEvent {
+            text: "qq".into(),
+            ..Default::default()
+        }),
+    )));
+
+    assert_eq!(converted.preedit, "あいさつ");
+    assert!(
+        converted
+            .candidates
+            .iter()
+            .any(|candidate| candidate.text == "挨拶語")
+    );
+}
+
+#[test]
+fn rejects_an_invalid_custom_input_table() {
+    let resources = TempDir::new().unwrap();
+    let input_table = resources.path().join("invalid.tsv");
+    std::fs::write(&input_table, "missing separator\n").unwrap();
+
+    let error = match Engine::open_with_conversion_resources(
+        dictionary_root(),
+        &ConversionConfig {
+            custom_input_tables: BTreeMap::from([("invalid".into(), input_table)]),
+            ..Default::default()
+        },
+    ) {
+        Ok(_) => panic!("invalid input table was accepted"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(
+        error,
+        EngineOpenError::ConversionResource(ConversionResourceError::InvalidInputTable {
+            name
+        }) if name == "invalid"
+    ));
+}
+
+#[test]
 fn isolates_sessions_and_rejects_out_of_order_requests() {
     let mut engine = Engine::open(dictionary_root()).unwrap();
     response(engine.handle(envelope(
@@ -299,6 +381,7 @@ fn isolates_sessions_and_rejects_out_of_order_requests() {
             input_style: protocol::InputStyle::Direct as i32,
             surrounding_text: None,
             keyboard_language: protocol::KeyboardLanguage::Japanese as i32,
+            custom_input_table: String::new(),
         }),
     )));
     let error = engine.handle(envelope(
@@ -313,6 +396,7 @@ fn isolates_sessions_and_rejects_out_of_order_requests() {
             input_style: protocol::InputStyle::Direct as i32,
             surrounding_text: None,
             keyboard_language: protocol::KeyboardLanguage::Japanese as i32,
+            custom_input_table: String::new(),
         }),
     );
     other.session_id = "other".into();
@@ -333,6 +417,7 @@ fn rejects_invalid_surrounding_text_and_resets_the_session() {
                 anchor: 0,
             }),
             keyboard_language: protocol::KeyboardLanguage::Japanese as i32,
+            custom_input_table: String::new(),
         }),
     ));
 
@@ -389,6 +474,7 @@ fn applies_zenz_prefix_correction_through_the_session_engine() {
             input_style: protocol::InputStyle::Direct as i32,
             surrounding_text: None,
             keyboard_language: protocol::KeyboardLanguage::Japanese as i32,
+            custom_input_table: String::new(),
         }),
     )));
 
@@ -424,6 +510,7 @@ fn preserves_special_candidates_after_zenz_conversion() {
             input_style: protocol::InputStyle::Direct as i32,
             surrounding_text: None,
             keyboard_language: protocol::KeyboardLanguage::Japanese as i32,
+            custom_input_table: String::new(),
         }),
     )));
 

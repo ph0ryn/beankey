@@ -9,6 +9,7 @@ enum InputStyle {
   INPUT_STYLE_AZIK = 3;
   INPUT_STYLE_KANA_JIS = 4;
   INPUT_STYLE_KANA_US = 5;
+  INPUT_STYLE_CUSTOM = 6;
 }
 
 enum KeyboardLanguage {
@@ -29,6 +30,7 @@ message StartSession {
   InputStyle input_style = 1;
   SurroundingText surrounding_text = 2;
   KeyboardLanguage keyboard_language = 3;
+  string custom_input_table = 4;
 }
 
 message ResetSession {}

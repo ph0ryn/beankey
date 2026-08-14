@@ -11,6 +11,7 @@ beankey-llama = { path = "../llama" }
 libc = "0.2.189"
 prost.workspace = true
 serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.149"
 toml = "1.1.4"
 
 [build-dependencies]

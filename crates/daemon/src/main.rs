@@ -18,15 +18,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     let learning_directory =
         state_home(std::env::var_os("XDG_STATE_HOME"), std::env::var_os("HOME"))?
             .join("beankey/learning");
-    let engine = Engine::open_with_assets(
-        &config.dictionary,
-        &config.model,
-        &config.llama_backend_directory,
-        &config.emoji_dictionary,
-        &config.hunspell.english_dictionary,
-        &config.hunspell.greek_dictionary,
-        learning_directory,
-    )?;
+    let engine = Engine::open_with_config(&config, learning_directory)?;
     let server = match DaemonServer::bind_from_environment(engine, &config.runtime_socket) {
         Ok(server) => server,
         Err(ServerError::AlreadyRunning) => return Ok(()),

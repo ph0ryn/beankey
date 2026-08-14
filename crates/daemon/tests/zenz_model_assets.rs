@@ -41,6 +41,7 @@ fn converts_with_the_fixed_zenz_model_and_llama_backend() {
             input_style: protocol::InputStyle::Direct as i32,
             surrounding_text: None,
             keyboard_language: protocol::KeyboardLanguage::Japanese as i32,
+            custom_input_table: String::new(),
         }),
     ));
 
@@ -90,6 +91,9 @@ runtime_socket = "beankey/daemon.sock"
 english_dictionary = "{english}"
 greek_dictionary = "{greek}"
 
+[conversion]
+custom_input_tables = {{}}
+
 [inference]
 context_size = 512
 batch_size = 512
@@ -120,6 +124,7 @@ flash_attention = true
                 input_style: protocol::InputStyle::Direct as i32,
                 surrounding_text: None,
                 keyboard_language: protocol::KeyboardLanguage::EnglishUs as i32,
+                custom_input_table: String::new(),
             }),
         ),
         envelope(
