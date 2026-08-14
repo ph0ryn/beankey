@@ -182,6 +182,12 @@ impl InputTable {
         }))
     }
 
+    pub(crate) fn entries(&self) -> impl Iterator<Item = (&[KeyElement], &[ValueElement])> {
+        self.mappings
+            .iter()
+            .map(|mapping| (mapping.key.as_slice(), mapping.value.as_slice()))
+    }
+
     pub fn apply(&self, buffer: &mut Vec<Grapheme>, added: InputPiece) -> usize {
         let best = self
             .mappings
