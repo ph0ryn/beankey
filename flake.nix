@@ -356,6 +356,7 @@
               }
               ''
                 cp ${./Cargo.toml} Cargo.toml
+                cp -R ${./crates} crates
                 cargo metadata \
                   --format-version 1 \
                   --no-deps \
