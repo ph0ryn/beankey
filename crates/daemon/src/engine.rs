@@ -10,14 +10,17 @@ use beankey_converter::{
     DictionaryError, DictionaryMetadata, DictionaryStore, ForeignCompletionProvider, FormatReport,
     HunspellCompleter, HunspellError, InputModifier, InputStyle as ConverterInputStyle, InputTable,
     InputTableId, InputTableRegistry, KeyboardLanguage, LearningError, LearningMemory,
-    LearningMode, NGramError, NormalConverter, PostCompositionPrediction, PostCompositionPredictor,
-    PredictionMode, RequestOptions, SelectionError, TextReplacer, TextReplacerError,
-    TypoCorrectionMode, ZenzLanguageModel, ZenzV3Config, ZenzVersionConfig,
+    LearningMode, LmTypoConfig, NGramError, NGramLanguageModel, NormalConverter,
+    PostCompositionPrediction, PostCompositionPredictor, PredictionMode, RequestOptions,
+    SelectionError, TextReplacer, TextReplacerError, TypoCorrectionMode, ZenzLanguageModel,
+    ZenzV3Config, ZenzVersionConfig, experimental_typo_correction,
 };
 use beankey_llama::LlamaError;
 use serde::Deserialize;
 
-use crate::config::{ConversionConfig, DaemonConfig, PredictionConfig, TypoCorrectionConfig};
+use crate::config::{
+    ConversionConfig, DaemonConfig, LmTypoLanguageModel, PredictionConfig, TypoCorrectionConfig,
+};
 use crate::protocol::composing_count::Count;
 use crate::protocol::envelope::Payload;
 use crate::protocol::protocol_error::Code;
@@ -65,6 +68,10 @@ pub struct Engine {
     zenz_inference_limit: usize,
     zenz_predictive_input: bool,
     zenz_personalization: Option<zenz::ZenzPersonalizationModels>,
+    lm_typo_enabled: bool,
+    lm_typo_language_model: LmTypoLanguageModel,
+    lm_typo_config: LmTypoConfig,
+    lm_typo_ngram: Option<NGramLanguageModel>,
     foreign_completion_provider: Option<Arc<dyn ForeignCompletionProvider>>,
     learning_memory: Option<LearningMemory>,
     text_replacer: Option<TextReplacer>,
@@ -214,6 +221,10 @@ impl Engine {
             zenz_inference_limit: zenz::DEFAULT_INFERENCE_LIMIT,
             zenz_predictive_input: false,
             zenz_personalization: None,
+            lm_typo_enabled: false,
+            lm_typo_language_model: LmTypoLanguageModel::Zenz,
+            lm_typo_config: LmTypoConfig::default(),
+            lm_typo_ngram: None,
             foreign_completion_provider: None,
             learning_memory: None,
             text_replacer: None,
@@ -263,6 +274,7 @@ impl Engine {
         engine.apply_conversion_options(&config.conversion);
         engine.apply_zenz_options(&config.zenz);
         engine.load_zenz_personalization(&config.zenz)?;
+        engine.load_lm_typo(&config.lm_typo)?;
         Ok(engine)
     }
 
@@ -430,6 +442,41 @@ impl Engine {
         Ok(())
     }
 
+    fn load_lm_typo(
+        &mut self,
+        config: &crate::config::LmTypoCorrectionConfig,
+    ) -> Result<(), NGramError> {
+        self.lm_typo_enabled = config.enabled;
+        self.lm_typo_language_model = config.language_model;
+        self.lm_typo_config = LmTypoConfig {
+            beam_size: config.beam_size,
+            top_k: config.top_k,
+            n_best: config.n_best,
+            max_steps: config.max_steps,
+            substitution_cost: config.substitution_cost,
+            deletion_cost: config.deletion_cost,
+            transposition_cost: config.transposition_cost,
+        };
+        self.lm_typo_ngram =
+            if config.enabled && config.language_model == LmTypoLanguageModel::Ngram {
+                config
+                    .ngram
+                    .as_ref()
+                    .map(|ngram| {
+                        NGramLanguageModel::open(
+                            &ngram.prefix,
+                            &ngram.tokenizer,
+                            ngram.n,
+                            ngram.discount,
+                        )
+                    })
+                    .transpose()?
+            } else {
+                None
+            };
+        Ok(())
+    }
+
     pub fn handle(&mut self, envelope: protocol::Envelope) -> protocol::Envelope {
         let request_id = envelope.request_id;
         let session_id = envelope.session_id.clone();
@@ -538,7 +585,9 @@ impl Engine {
                     },
                 )
             }
-            Payload::StateResponse(_) | Payload::ProtocolError(_) => error_envelope(
+            Payload::StateResponse(_)
+            | Payload::TypoCorrectionResponse(_)
+            | Payload::ProtocolError(_) => error_envelope(
                 request_id,
                 session_id,
                 Code::InvalidPayload,
@@ -585,6 +634,24 @@ impl Engine {
                     ..Default::default()
                 },
             );
+        }
+        if matches!(request, Payload::RequestTypoCorrections(_)) {
+            let result = self.request_typo_corrections(&session);
+            match result {
+                Ok(candidates) => {
+                    self.sessions.insert(session_id.clone(), session);
+                    return typo_correction_envelope(request_id, session_id, candidates);
+                }
+                Err((code, message)) => {
+                    session.conversion.reset();
+                    session.selected_candidate = 0;
+                    session.last_committed = None;
+                    session.post_predictions.clear();
+                    session.live_candidate = None;
+                    self.sessions.insert(session_id.clone(), session);
+                    return error_envelope(request_id, session_id, code, message);
+                }
+            }
         }
 
         let response = match request {
@@ -651,7 +718,9 @@ impl Engine {
             }
             Payload::StartSession(_)
             | Payload::EndSession(_)
+            | Payload::RequestTypoCorrections(_)
             | Payload::StateResponse(_)
+            | Payload::TypoCorrectionResponse(_)
             | Payload::ProtocolError(_) => {
                 Err((Code::InvalidPayload, "invalid session request".into()))
             }
@@ -670,6 +739,46 @@ impl Engine {
                 error_envelope(request_id, session_id, code, message)
             }
         }
+    }
+
+    fn request_typo_corrections(
+        &mut self,
+        session: &SessionState,
+    ) -> SessionRequestResult<Vec<beankey_converter::LmTypoCandidate>> {
+        if !self.lm_typo_enabled {
+            return Err((
+                Code::InvalidPayload,
+                "LM typo correction is disabled".into(),
+            ));
+        }
+        let model: &mut dyn ZenzLanguageModel = match self.lm_typo_language_model {
+            LmTypoLanguageModel::Zenz => self.zenz_model.as_deref_mut().ok_or_else(|| {
+                (
+                    Code::Internal,
+                    "Zenz model is unavailable for LM typo correction".into(),
+                )
+            })?,
+            LmTypoLanguageModel::Ngram => self.lm_typo_ngram.as_mut().ok_or_else(|| {
+                (
+                    Code::Internal,
+                    "N-gram model is unavailable for LM typo correction".into(),
+                )
+            })?,
+        };
+        experimental_typo_correction(
+            model,
+            session.surrounding.left.as_deref().unwrap_or(""),
+            session.conversion.composing(),
+            &session.input_style,
+            &self.tables,
+            &self.lm_typo_config,
+        )
+        .map_err(|error| {
+            (
+                Code::Internal,
+                format!("LM typo correction failed: {error}"),
+            )
+        })
     }
 
     fn handle_key(
@@ -1316,6 +1425,34 @@ fn state_envelope(
     }
 }
 
+fn typo_correction_envelope(
+    request_id: u64,
+    session_id: String,
+    candidates: Vec<beankey_converter::LmTypoCandidate>,
+) -> protocol::Envelope {
+    protocol::Envelope {
+        protocol_version: PROTOCOL_VERSION,
+        request_id,
+        session_id,
+        payload: Some(Payload::TypoCorrectionResponse(
+            protocol::TypoCorrectionResponse {
+                candidates: candidates
+                    .into_iter()
+                    .map(|candidate| protocol::TypoCorrectionCandidate {
+                        corrected_input: candidate.corrected_input,
+                        converted_text: candidate.converted_text,
+                        score: candidate.score,
+                        language_model_score: candidate.lm_score,
+                        channel_cost: candidate.channel_cost,
+                        prominence: candidate.prominence,
+                    })
+                    .collect(),
+            },
+        )),
+        trace: Vec::new(),
+    }
+}
+
 fn error_envelope(
     request_id: u64,
     session_id: String,
@@ -1447,5 +1584,75 @@ mod tests {
         engine.load_zenz_personalization(&config).unwrap();
 
         assert!(engine.zenz_personalization.is_some());
+    }
+
+    #[test]
+    fn returns_lm_typo_candidates_without_mutating_composition() {
+        let dictionary = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("data/azooKey_dictionary_storage/Dictionary");
+        let ngram =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../converter/tests/data/ngram/lm");
+        let tokenizer = std::env::var_os("BEANKEY_TEST_ZENZ_TOKENIZER")
+            .expect("BEANKEY_TEST_ZENZ_TOKENIZER must point to tokenizer.json");
+        let mut engine = Engine::open(dictionary).unwrap();
+        engine
+            .load_lm_typo(&crate::LmTypoCorrectionConfig {
+                enabled: true,
+                language_model: crate::LmTypoLanguageModel::Ngram,
+                ngram: Some(crate::TypoNGramConfig {
+                    prefix: ngram,
+                    tokenizer: tokenizer.into(),
+                    n: 2,
+                    discount: 0.75,
+                }),
+                max_steps: Some(0),
+                ..Default::default()
+            })
+            .unwrap();
+        let envelope = |request_id, payload| protocol::Envelope {
+            protocol_version: PROTOCOL_VERSION,
+            request_id,
+            session_id: "typo".into(),
+            payload: Some(payload),
+            trace: Vec::new(),
+        };
+        engine.handle(envelope(
+            1,
+            Payload::StartSession(protocol::StartSession {
+                input_style: protocol::InputStyle::RomanToKana as i32,
+                surrounding_text: None,
+                keyboard_language: protocol::KeyboardLanguage::Japanese as i32,
+                custom_input_table: String::new(),
+            }),
+        ));
+        engine.handle(envelope(
+            2,
+            Payload::KeyEvent(protocol::KeyEvent {
+                text: "kana".into(),
+                ..Default::default()
+            }),
+        ));
+
+        let correction = engine.handle(envelope(
+            3,
+            Payload::RequestTypoCorrections(protocol::RequestTypoCorrections {}),
+        ));
+        let Payload::TypoCorrectionResponse(correction) = correction.payload.unwrap() else {
+            panic!("LM typo correction did not return its dedicated response");
+        };
+        assert_eq!(correction.candidates[0].corrected_input, "kana");
+
+        let state = engine.handle(envelope(
+            4,
+            Payload::KeyEvent(protocol::KeyEvent {
+                key_sym: KEY_LEFT,
+                ..Default::default()
+            }),
+        ));
+        let Payload::StateResponse(state) = state.payload.unwrap() else {
+            panic!("composition did not remain active");
+        };
+        assert_eq!(state.preedit, "かな");
     }
 }

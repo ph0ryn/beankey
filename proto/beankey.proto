@@ -70,6 +70,8 @@ message ForgetCandidate {
 
 message ResetLearning {}
 
+message RequestTypoCorrections {}
+
 message ComposingCount {
   oneof count {
     uint32 input = 1;
@@ -102,6 +104,19 @@ message StateResponse {
   sint32 selected_candidate = 5;
   string commit = 6;
   bool reset = 7;
+}
+
+message TypoCorrectionCandidate {
+  string corrected_input = 1;
+  string converted_text = 2;
+  float score = 3;
+  float language_model_score = 4;
+  float channel_cost = 5;
+  float prominence = 6;
+}
+
+message TypoCorrectionResponse {
+  repeated TypoCorrectionCandidate candidates = 1;
 }
 
 message ProtocolError {
@@ -140,8 +155,10 @@ message Envelope {
     CommitComposition commit_composition = 16;
     ForgetCandidate forget_candidate = 17;
     ResetLearning reset_learning = 18;
+    RequestTypoCorrections request_typo_corrections = 19;
     StateResponse state_response = 20;
     ProtocolError protocol_error = 21;
+    TypoCorrectionResponse typo_correction_response = 22;
   }
 
   repeated TraceEvent trace = 30;

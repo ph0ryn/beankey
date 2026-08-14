@@ -108,6 +108,16 @@ rich_candidates = false
 predictive_input = false
 enable_alignment_separator = false
 
+[lm_typo]
+enabled = false
+language_model = "zenz"
+beam_size = 32
+top_k = 64
+n_best = 5
+substitution_cost = 2.0
+deletion_cost = 3.0
+transposition_cost = 2.0
+
 [inference]
 context_size = 512
 batch_size = 512

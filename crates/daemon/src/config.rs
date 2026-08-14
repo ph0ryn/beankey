@@ -21,6 +21,8 @@ pub struct DaemonConfig {
     pub hunspell: HunspellConfig,
     pub conversion: ConversionConfig,
     pub zenz: ZenzConfig,
+    #[serde(default)]
+    pub lm_typo: LmTypoCorrectionConfig,
     pub inference: InferenceConfig,
 }
 
@@ -114,6 +116,55 @@ pub struct PersonalizationConfig {
     pub alpha: f32,
 }
 
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct LmTypoCorrectionConfig {
+    pub enabled: bool,
+    pub language_model: LmTypoLanguageModel,
+    pub ngram: Option<TypoNGramConfig>,
+    pub beam_size: usize,
+    pub top_k: usize,
+    pub n_best: usize,
+    pub max_steps: Option<usize>,
+    pub substitution_cost: f32,
+    pub deletion_cost: f32,
+    pub transposition_cost: f32,
+}
+
+impl Default for LmTypoCorrectionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            language_model: LmTypoLanguageModel::Zenz,
+            ngram: None,
+            beam_size: 32,
+            top_k: 64,
+            n_best: 5,
+            max_steps: None,
+            substitution_cost: 2.0,
+            deletion_cost: 3.0,
+            transposition_cost: 2.0,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum LmTypoLanguageModel {
+    #[default]
+    Zenz,
+    Ngram,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct TypoNGramConfig {
+    pub prefix: PathBuf,
+    pub tokenizer: PathBuf,
+    pub n: usize,
+    pub discount: f64,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct HunspellConfig {
@@ -137,6 +188,7 @@ pub enum DaemonConfigError {
     InvalidRuntimeSocket,
     InvalidConversionCandidateCount,
     InvalidPersonalizationAlpha,
+    InvalidLmTypoConfiguration,
     UnsupportedInferenceProfile(InferenceConfig),
 }
 
@@ -156,6 +208,9 @@ impl fmt::Display for DaemonConfigError {
                     formatter,
                     "zenz.personalization.alpha must be finite and nonnegative"
                 )
+            }
+            Self::InvalidLmTypoConfiguration => {
+                write!(formatter, "lm_typo configuration is invalid or incomplete")
             }
             Self::UnsupportedInferenceProfile(profile) => write!(
                 formatter,
@@ -177,6 +232,7 @@ impl Error for DaemonConfigError {
             Self::InvalidRuntimeSocket
             | Self::InvalidConversionCandidateCount
             | Self::InvalidPersonalizationAlpha
+            | Self::InvalidLmTypoConfiguration
             | Self::UnsupportedInferenceProfile(_) => None,
         }
     }
@@ -225,6 +281,28 @@ impl DaemonConfig {
         {
             return Err(DaemonConfigError::InvalidPersonalizationAlpha);
         }
+        let typo = &self.lm_typo;
+        let invalid_typo = typo.enabled
+            && (typo.beam_size == 0
+                || typo.top_k == 0
+                || typo.n_best == 0
+                || [
+                    typo.substitution_cost,
+                    typo.deletion_cost,
+                    typo.transposition_cost,
+                ]
+                .into_iter()
+                .any(|cost| !cost.is_finite() || cost < 0.0)
+                || match (typo.language_model, typo.ngram.as_ref()) {
+                    (LmTypoLanguageModel::Zenz, _) => false,
+                    (LmTypoLanguageModel::Ngram, Some(ngram)) => {
+                        ngram.n < 2 || !ngram.discount.is_finite()
+                    }
+                    (LmTypoLanguageModel::Ngram, None) => true,
+                });
+        if invalid_typo {
+            return Err(DaemonConfigError::InvalidLmTypoConfiguration);
+        }
         Ok(())
     }
 }
@@ -260,6 +338,16 @@ inference_limit = 10
 rich_candidates = false
 predictive_input = false
 enable_alignment_separator = false
+
+[lm_typo]
+enabled = false
+language_model = "zenz"
+beam_size = 32
+top_k = 64
+n_best = 5
+substitution_cost = 2.0
+deletion_cost = 3.0
+transposition_cost = 2.0
 
 [inference]
 context_size = 512
@@ -320,6 +408,17 @@ flash_attention = true
         assert!(matches!(
             DaemonConfig::parse(&config),
             Err(DaemonConfigError::InvalidPersonalizationAlpha)
+        ));
+    }
+
+    #[test]
+    fn requires_assets_for_enabled_ngram_typo_correction() {
+        let config = CONFIG
+            .replace("enabled = false", "enabled = true")
+            .replace("language_model = \"zenz\"", "language_model = \"ngram\"");
+        assert!(matches!(
+            DaemonConfig::parse(&config),
+            Err(DaemonConfigError::InvalidLmTypoConfiguration)
         ));
     }
 }
