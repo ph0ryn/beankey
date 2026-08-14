@@ -23,7 +23,7 @@ Fcitx5連携、変換デーモン、llama.cpp連携、NixパッケージとNixOS
 ## 確定した設計
 
 - かな漢字変換コアと変換デーモンはRustで実装する。
-- Fcitx5アドオンは薄いC++17実装にする。
+- Fcitx5アドオンは薄いC++20実装にする。固定したnixpkgsのFcitx5 5.1.21が公開ヘッダーと公式CMake設定でC++20を要求するため、この言語版を下限とする。
 - 変換エンジンとllama.cppは、Fcitx5とは別のデーモンで動かす。
 - アドオンとデーモンは、Unixドメインソケット上のProtobufで通信する。
 - デーモンへ接続できない場合は、アドオンがNix store pathを指定してserver executableを直接起動し、接続を再試行する。

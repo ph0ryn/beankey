@@ -5,7 +5,7 @@
 - beankey は、NixOS で動作するかな漢字変換器を実装するプロジェクトである。
 - 製品コードを Swift に依存させない。
 - 独自 GUI は実装対象に含めず、候補表示は Fcitx5 の標準 UI に委ねる。
-- Rust で変換本体と daemon を実装し、Fcitx5 addon は薄い C++17 の層とする。
+- Rust で変換本体と daemon を実装し、Fcitx5 addon は薄い C++20 の層とする。
 - Fcitx5 addon と daemon は Unix domain socket 上の Protobuf で通信する。
 - daemon の起動は fcitx5-mozc の方式に合わせ、addon が接続時に必要であれば daemon を直接起動する。systemd service や socket activation は利用しない。
 - ニューラル推論には、`flake.lock` で固定された nixpkgs の `pkgs.llama-cpp` を利用する。
@@ -39,7 +39,7 @@
 │   ├── converter/   # 辞書読込とかな漢字変換本体
 │   ├── llama/       # llama.cpp との FFI 境界
 │   └── daemon/      # IPC セッションと各コンポーネントの接続
-├── fcitx5/          # 薄い C++17 addon
+├── fcitx5/          # 薄い C++20 addon
 │   ├── CMakeLists.txt
 │   └── src/
 ├── proto/
