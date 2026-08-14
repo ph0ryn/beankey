@@ -164,6 +164,15 @@ impl InputTable {
         Self::new(entries)
     }
 
+    pub fn default_kana_us() -> Self {
+        let mut entries = simple_tsv_entries(include_str!("kana_us.tsv"));
+        entries.push((
+            vec![KeyElement::Piece(InputPiece::CompositionSeparator)],
+            vec![],
+        ));
+        Self::new(entries)
+    }
+
     pub fn combined(tables: impl IntoIterator<Item = Self>) -> Self {
         Self::new(tables.into_iter().flat_map(|table| {
             table
@@ -435,5 +444,14 @@ mod tests {
         };
         assert_eq!(table.applied("", shifted_zero), "を");
         assert_eq!(table.applied("", InputPiece::character("0")), "わ");
+    }
+
+    #[test]
+    fn converts_us_kana_keys() {
+        let table = InputTable::default_kana_us();
+
+        assert_eq!(type_text(&table, "qwerty"), "たていすかん");
+        assert_eq!(type_text(&table, "f「"), "ば");
+        assert_eq!(type_text(&table, "f＝"), "ぱ");
     }
 }

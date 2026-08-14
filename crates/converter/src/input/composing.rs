@@ -32,6 +32,7 @@ pub struct InputTableRegistry {
     roman_to_kana: InputTable,
     azik: InputTable,
     kana_jis: InputTable,
+    kana_us: InputTable,
     custom: HashMap<String, InputTable>,
 }
 
@@ -42,6 +43,7 @@ impl Default for InputTableRegistry {
             roman_to_kana: InputTable::default_roman_to_kana(),
             azik: InputTable::default_azik(),
             kana_jis: InputTable::default_kana_jis(),
+            kana_us: InputTable::default_kana_us(),
             custom: HashMap::new(),
         }
     }
@@ -64,10 +66,10 @@ impl InputTableRegistry {
             InputStyle::Mapped(InputTableId::DefaultRomanToKana) => Some(&self.roman_to_kana),
             InputStyle::Mapped(InputTableId::DefaultAzik) => Some(&self.azik),
             InputStyle::Mapped(InputTableId::DefaultKanaJis) => Some(&self.kana_jis),
+            InputStyle::Mapped(InputTableId::DefaultKanaUs) => Some(&self.kana_us),
             InputStyle::Mapped(InputTableId::Named(name)) => {
                 Some(self.custom.get(name).unwrap_or(&self.empty))
             }
-            InputStyle::Mapped(InputTableId::DefaultKanaUs) => Some(&self.empty),
         }
     }
 }
