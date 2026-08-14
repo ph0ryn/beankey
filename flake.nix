@@ -227,6 +227,8 @@
           ];
           BEANKEY_TEST_EN_US_DICTIONARY = "${pkgs.hunspellDicts.en_US}/share/hunspell/en_US";
           BEANKEY_TEST_EL_GR_DICTIONARY = "${pkgs.hunspellDicts.el_GR}/share/hunspell/el_GR";
+          BEANKEY_TEST_MODEL = "${beankeyModel pkgs}/share/beankey/model/ggml-model-Q5_K_M.gguf";
+          BEANKEY_TEST_LLAMA_BACKEND = "${pkgs.llama-cpp}/bin";
           BEANKEY_TEST_ZENZ_TOKENIZER = "${beankeyTokenizer pkgs}/share/beankey/tokenizer/tokenizer.json";
           postInstall = ''
             install -Dm644 ${./LICENSE} "$out/share/licenses/beankey/LICENSE"
