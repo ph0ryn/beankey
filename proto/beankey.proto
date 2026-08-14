@@ -1,0 +1,121 @@
+syntax = "proto3";
+
+package beankey.v1;
+
+enum InputStyle {
+  INPUT_STYLE_UNSPECIFIED = 0;
+  INPUT_STYLE_DIRECT = 1;
+  INPUT_STYLE_ROMAN_TO_KANA = 2;
+  INPUT_STYLE_AZIK = 3;
+  INPUT_STYLE_KANA_JIS = 4;
+  INPUT_STYLE_KANA_US = 5;
+}
+
+message SurroundingText {
+  bool available = 1;
+  string text = 2;
+  uint32 cursor = 3;
+  uint32 anchor = 4;
+}
+
+message StartSession {
+  InputStyle input_style = 1;
+  SurroundingText surrounding_text = 2;
+}
+
+message ResetSession {}
+
+message EndSession {}
+
+message KeyEvent {
+  uint32 key_sym = 1;
+  uint32 modifiers = 2;
+  bool release = 3;
+  string text = 4;
+  SurroundingText surrounding_text = 5;
+}
+
+message SelectCandidate {
+  uint32 index = 1;
+}
+
+message PageCandidates {
+  enum Direction {
+    DIRECTION_UNSPECIFIED = 0;
+    DIRECTION_PREVIOUS = 1;
+    DIRECTION_NEXT = 2;
+  }
+
+  Direction direction = 1;
+}
+
+message CommitComposition {}
+
+message ComposingCount {
+  oneof count {
+    uint32 input = 1;
+    uint32 surface = 2;
+  }
+}
+
+message CursorAction {
+  sint32 move = 1;
+}
+
+message Candidate {
+  string text = 1;
+  float value = 2;
+  ComposingCount composing_count = 3;
+  repeated CursorAction actions = 4;
+}
+
+message StateResponse {
+  bool consumed = 1;
+  string preedit = 2;
+  uint32 preedit_cursor = 3;
+  repeated Candidate candidates = 4;
+  sint32 selected_candidate = 5;
+  string commit = 6;
+  bool reset = 7;
+}
+
+message ProtocolError {
+  enum Code {
+    CODE_UNSPECIFIED = 0;
+    CODE_UNSUPPORTED_VERSION = 1;
+    CODE_INVALID_PAYLOAD = 2;
+    CODE_MESSAGE_TOO_LARGE = 3;
+    CODE_UNKNOWN_SESSION = 4;
+    CODE_OUT_OF_ORDER_REQUEST = 5;
+    CODE_INTERNAL = 6;
+  }
+
+  Code code = 1;
+  string message = 2;
+}
+
+message TraceEvent {
+  string component = 1;
+  string operation = 2;
+  string detail = 3;
+}
+
+message Envelope {
+  uint32 protocol_version = 1;
+  uint64 request_id = 2;
+  string session_id = 3;
+
+  oneof payload {
+    StartSession start_session = 10;
+    ResetSession reset_session = 11;
+    EndSession end_session = 12;
+    KeyEvent key_event = 13;
+    SelectCandidate select_candidate = 14;
+    PageCandidates page_candidates = 15;
+    CommitComposition commit_composition = 16;
+    StateResponse state_response = 20;
+    ProtocolError protocol_error = 21;
+  }
+
+  repeated TraceEvent trace = 30;
+}
