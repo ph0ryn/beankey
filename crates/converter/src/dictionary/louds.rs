@@ -10,6 +10,7 @@ pub enum LoudsError {
     InvalidWordLength(usize),
     MissingZeroDelimiters { needed: usize, found: usize },
     NodeTableTooLarge(usize),
+    InvalidTopology { node: usize, zero_position: usize },
 }
 
 impl fmt::Display for LoudsError {
@@ -31,6 +32,13 @@ impl fmt::Display for LoudsError {
                     "character ID table contains {length} entries; maximum is 256"
                 )
             }
+            Self::InvalidTopology {
+                node,
+                zero_position,
+            } => write!(
+                formatter,
+                "LOUDS node {node} has invalid zero position {zero_position}"
+            ),
         }
     }
 }
@@ -90,7 +98,7 @@ impl Louds {
 
         let needed_zeros = node_ids.len();
         let mut zero_positions = Vec::with_capacity(needed_zeros);
-        let mut bit_position = 0;
+        let mut bit_position = 0_usize;
         for chunk in bits.chunks_exact(8) {
             let word = u64::from_le_bytes(chunk.try_into().expect("chunk width"));
             for shift in (0..64).rev() {
@@ -115,8 +123,20 @@ impl Louds {
 
         let mut child_ranges = vec![0..0; node_ids.len()];
         for node in 1..node_ids.len() {
-            let start = zero_positions[node - 1] - node + 2;
-            let end = zero_positions[node] - node + 1;
+            let start = zero_positions[node - 1]
+                .checked_sub(node)
+                .and_then(|value| value.checked_add(2))
+                .ok_or(LoudsError::InvalidTopology {
+                    node,
+                    zero_position: zero_positions[node - 1],
+                })?;
+            let end = zero_positions[node]
+                .checked_sub(node)
+                .and_then(|value| value.checked_add(1))
+                .ok_or(LoudsError::InvalidTopology {
+                    node,
+                    zero_position: zero_positions[node],
+                })?;
             child_ranges[node] = start.min(node_ids.len())..end.min(node_ids.len());
         }
         Ok(Self {
@@ -127,6 +147,10 @@ impl Louds {
 
     pub fn child_range(&self, parent: usize) -> Range<usize> {
         self.child_ranges.get(parent).cloned().unwrap_or(0..0)
+    }
+
+    pub fn node_count(&self) -> usize {
+        self.node_ids.len()
     }
 
     pub fn search_child(&self, parent: usize, character_id: u8) -> Option<usize> {
@@ -225,6 +249,14 @@ mod tests {
         assert_eq!(louds.child_range(2), 3..4);
         assert_eq!(louds.search(&[10, 20]), Some(3));
         assert_eq!(louds.search(&[20]), None);
+    }
+
+    #[test]
+    fn rejects_an_invalid_topology_without_panicking() {
+        assert!(matches!(
+            Louds::parse(&[0; 8], &[0, 0, 0]),
+            Err(LoudsError::InvalidTopology { .. })
+        ));
     }
 
     #[test]

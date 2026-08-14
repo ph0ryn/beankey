@@ -4,7 +4,7 @@ use std::fmt;
 use crate::{
     Candidate, ComposingText, ConversionContext, DictionaryEntry, DictionaryError,
     DictionaryMetadata, InputStyle, InputTableRegistry, LearningError, LearningMemory,
-    NormalConverter, PostCompositionPrediction, PostCompositionPredictor,
+    NormalConverter, PostCompositionPrediction, PostCompositionPredictor, UserDictionary,
 };
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -105,6 +105,7 @@ pub struct ConversionSession {
     last_committed: Option<Candidate>,
     user_dictionary: Vec<DictionaryEntry>,
     user_shortcuts: Vec<DictionaryEntry>,
+    file_user_dictionary: UserDictionary,
     learning_memory: Option<LearningMemory>,
     learned_dictionary: Vec<DictionaryEntry>,
 }
@@ -133,6 +134,15 @@ impl ConversionSession {
         self.user_dictionary = entries;
         self.user_shortcuts = shortcuts;
         self.candidates.clear();
+    }
+
+    pub fn update_user_dictionary_path(
+        &mut self,
+        path: impl Into<std::path::PathBuf>,
+    ) -> Result<(), DictionaryError> {
+        self.file_user_dictionary = UserDictionary::open(path)?;
+        self.candidates.clear();
+        Ok(())
     }
 
     pub fn set_learning_memory(&mut self, memory: LearningMemory) -> Result<(), LearningError> {
@@ -177,6 +187,7 @@ impl ConversionSession {
     fn additional_dictionary(&self) -> Vec<DictionaryEntry> {
         self.user_dictionary
             .iter()
+            .chain(self.file_user_dictionary.entries())
             .chain(&self.learned_dictionary)
             .cloned()
             .collect()
@@ -314,6 +325,7 @@ impl ConversionSession {
         leading.extend(
             self.user_shortcuts
                 .iter()
+                .chain(self.file_user_dictionary.shortcuts())
                 .filter(|entry| entry.ruby == katakana)
                 .cloned()
                 .map(|entry| {
