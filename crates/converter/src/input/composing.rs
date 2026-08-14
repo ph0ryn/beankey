@@ -58,7 +58,7 @@ impl InputTableRegistry {
         self.custom.insert(name.into(), table);
     }
 
-    fn resolve(&self, style: &InputStyle) -> Option<&InputTable> {
+    pub(crate) fn resolve(&self, style: &InputStyle) -> Option<&InputTable> {
         match style {
             InputStyle::Direct => None,
             InputStyle::RomanToKana => Some(&self.roman_to_kana),

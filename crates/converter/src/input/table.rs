@@ -231,6 +231,38 @@ impl InputTable {
         buffer.concat()
     }
 
+    pub fn possible_nexts(&self, prefix: &str) -> Vec<String> {
+        self.mappings
+            .iter()
+            .filter_map(|mapping| {
+                let key: Option<String> = mapping
+                    .key
+                    .iter()
+                    .map(|element| match element {
+                        KeyElement::Piece(InputPiece::Character(value)) => Some(value.as_str()),
+                        _ => None,
+                    })
+                    .collect();
+                let key = key?;
+                if prefix.is_empty()
+                    || prefix.chars().count() >= key.chars().count()
+                    || !key.starts_with(prefix)
+                {
+                    return None;
+                }
+                let value: Option<String> = mapping
+                    .value
+                    .iter()
+                    .map(|element| match element {
+                        ValueElement::Character(value) => Some(value.as_str()),
+                        ValueElement::Any => None,
+                    })
+                    .collect();
+                value.map(|value| to_katakana(&value))
+            })
+            .collect()
+    }
+
     fn match_mapping(
         &self,
         mapping_index: usize,
@@ -279,6 +311,18 @@ impl InputTable {
             resolved_wildcard,
         })
     }
+}
+
+fn to_katakana(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| match character {
+            '\u{3041}'..='\u{3096}' => {
+                char::from_u32(u32::from(character) + 96).expect("katakana scalar is valid")
+            }
+            _ => character,
+        })
+        .collect()
 }
 
 fn piece_matches(expected: &InputPiece, current: &InputPiece, exact_key_count: &mut usize) -> bool {
@@ -459,5 +503,15 @@ mod tests {
         assert_eq!(type_text(&table, "qwerty"), "たていすかん");
         assert_eq!(type_text(&table, "f「"), "ば");
         assert_eq!(type_text(&table, "f＝"), "ぱ");
+    }
+
+    #[test]
+    fn lists_complete_katakana_outputs_for_an_unstable_prefix() {
+        let table = InputTable::default_roman_to_kana();
+        let values = table.possible_nexts("ky");
+        assert!(values.contains(&"キャ".to_owned()));
+        assert!(values.contains(&"キュ".to_owned()));
+        assert!(values.contains(&"キョ".to_owned()));
+        assert!(!values.contains(&"キ".to_owned()));
     }
 }

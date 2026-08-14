@@ -112,6 +112,15 @@ impl ConversionSession {
         Ok(&self.candidates)
     }
 
+    pub fn request_predictions(
+        &self,
+        converter: &NormalConverter<'_>,
+        tables: &InputTableRegistry,
+        n_best: usize,
+    ) -> Result<Vec<Candidate>, DictionaryError> {
+        converter.predict(&self.composing, tables, n_best, self.context)
+    }
+
     pub fn select_candidate(
         &mut self,
         index: usize,
