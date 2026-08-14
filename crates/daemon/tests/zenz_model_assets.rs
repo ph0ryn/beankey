@@ -92,6 +92,14 @@ english_dictionary = "{english}"
 greek_dictionary = "{greek}"
 
 [conversion]
+n_best = 10
+japanese_prediction = "automatic"
+foreign_prediction = "automatic"
+full_width_roman = false
+half_width_kana = false
+typography = false
+typo_correction = "automatic"
+live_conversion = false
 custom_input_tables = {{}}
 
 [inference]

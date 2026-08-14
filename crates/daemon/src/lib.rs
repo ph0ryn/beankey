@@ -16,7 +16,10 @@ pub mod protocol {
     include!(concat!(env!("OUT_DIR"), "/beankey.v1.rs"));
 }
 
-pub use config::{ConversionConfig, DaemonConfig, DaemonConfigError, InferenceConfig};
+pub use config::{
+    ConversionConfig, DaemonConfig, DaemonConfigError, InferenceConfig, PredictionConfig,
+    TypoCorrectionConfig,
+};
 pub use engine::{ConversionResourceError, Engine, EngineOpenError};
 pub use server::{DaemonServer, ServerError};
 pub use zenz::{DEFAULT_INFERENCE_LIMIT, LlamaModel, ZenzConversionError};

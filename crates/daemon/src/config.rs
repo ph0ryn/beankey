@@ -23,13 +23,56 @@ pub struct DaemonConfig {
     pub inference: InferenceConfig,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(default, deny_unknown_fields)]
 pub struct ConversionConfig {
+    pub n_best: usize,
+    pub japanese_prediction: PredictionConfig,
+    pub foreign_prediction: PredictionConfig,
+    pub full_width_roman: bool,
+    pub half_width_kana: bool,
+    pub typography: bool,
+    pub typo_correction: TypoCorrectionConfig,
+    pub live_conversion: bool,
     pub user_dictionary: Option<PathBuf>,
     pub user_dictionary_directory: Option<PathBuf>,
-    #[serde(default)]
     pub custom_input_tables: BTreeMap<String, PathBuf>,
+}
+
+impl Default for ConversionConfig {
+    fn default() -> Self {
+        Self {
+            n_best: 10,
+            japanese_prediction: PredictionConfig::Automatic,
+            foreign_prediction: PredictionConfig::Automatic,
+            full_width_roman: false,
+            half_width_kana: false,
+            typography: false,
+            typo_correction: TypoCorrectionConfig::Automatic,
+            live_conversion: false,
+            user_dictionary: None,
+            user_dictionary_directory: None,
+            custom_input_tables: BTreeMap::new(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum PredictionConfig {
+    #[default]
+    Automatic,
+    Manual,
+    Disabled,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum TypoCorrectionConfig {
+    Enabled,
+    #[default]
+    Automatic,
+    Disabled,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -53,6 +96,7 @@ pub enum DaemonConfigError {
     Read(std::io::Error),
     Parse(toml::de::Error),
     InvalidRuntimeSocket,
+    InvalidConversionCandidateCount,
     UnsupportedInferenceProfile(InferenceConfig),
 }
 
@@ -63,6 +107,9 @@ impl fmt::Display for DaemonConfigError {
             Self::Parse(error) => write!(formatter, "invalid daemon configuration: {error}"),
             Self::InvalidRuntimeSocket => {
                 write!(formatter, "runtime_socket must be beankey/daemon.sock")
+            }
+            Self::InvalidConversionCandidateCount => {
+                write!(formatter, "conversion.n_best must be greater than zero")
             }
             Self::UnsupportedInferenceProfile(profile) => write!(
                 formatter,
@@ -81,7 +128,9 @@ impl Error for DaemonConfigError {
         match self {
             Self::Read(error) => Some(error),
             Self::Parse(error) => Some(error),
-            Self::InvalidRuntimeSocket | Self::UnsupportedInferenceProfile(_) => None,
+            Self::InvalidRuntimeSocket
+            | Self::InvalidConversionCandidateCount
+            | Self::UnsupportedInferenceProfile(_) => None,
         }
     }
 }
@@ -118,6 +167,9 @@ impl DaemonConfig {
                 self.inference.clone(),
             ));
         }
+        if self.conversion.n_best == 0 {
+            return Err(DaemonConfigError::InvalidConversionCandidateCount);
+        }
         Ok(())
     }
 }
@@ -138,6 +190,14 @@ english_dictionary = "/nix/store/en_US"
 greek_dictionary = "/nix/store/el_GR"
 
 [conversion]
+n_best = 10
+japanese_prediction = "automatic"
+foreign_prediction = "automatic"
+full_width_roman = false
+half_width_kana = false
+typography = false
+typo_correction = "automatic"
+live_conversion = false
 custom_input_tables = {}
 
 [inference]
@@ -178,6 +238,15 @@ flash_attention = true
         assert!(matches!(
             DaemonConfig::parse(&unknown),
             Err(DaemonConfigError::Parse(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_an_empty_candidate_search() {
+        let config = CONFIG.replace("n_best = 10", "n_best = 0");
+        assert!(matches!(
+            DaemonConfig::parse(&config),
+            Err(DaemonConfigError::InvalidConversionCandidateCount)
         ));
     }
 }

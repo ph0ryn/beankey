@@ -317,6 +317,7 @@ fn uses_a_json_user_dictionary_with_a_named_custom_input_table() {
             user_dictionary: Some(user_dictionary),
             user_dictionary_directory: None,
             custom_input_tables: BTreeMap::from([("greeting".into(), input_table)]),
+            ..Default::default()
         },
     )
     .unwrap();
@@ -344,6 +345,71 @@ fn uses_a_json_user_dictionary_with_a_named_custom_input_table() {
             .candidates
             .iter()
             .any(|candidate| candidate.text == "挨拶語")
+    );
+}
+
+#[test]
+fn applies_conversion_options_and_displays_live_conversion() {
+    let mut engine = Engine::open_with_conversion_resources(
+        dictionary_root(),
+        &ConversionConfig {
+            n_best: 3,
+            live_conversion: true,
+            full_width_roman: true,
+            typography: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    response(engine.handle(envelope(
+        1,
+        Payload::StartSession(protocol::StartSession {
+            input_style: protocol::InputStyle::Direct as i32,
+            surrounding_text: None,
+            keyboard_language: protocol::KeyboardLanguage::Japanese as i32,
+            custom_input_table: String::new(),
+        }),
+    )));
+
+    let converted = response(engine.handle(envelope(
+        2,
+        Payload::KeyEvent(protocol::KeyEvent {
+            text: "かなかんじへんかん".into(),
+            ..Default::default()
+        }),
+    )));
+
+    assert_ne!(converted.preedit, "かなかんじへんかん");
+    assert_eq!(
+        converted.preedit_cursor as usize,
+        converted.preedit.chars().count()
+    );
+    assert!(converted.candidates.len() >= 3);
+    let committed = response(engine.handle(envelope(
+        3,
+        Payload::KeyEvent(protocol::KeyEvent {
+            key_sym: 0xff0d,
+            ..Default::default()
+        }),
+    )));
+    assert_eq!(committed.commit, converted.preedit);
+
+    response(engine.handle(envelope(
+        4,
+        Payload::ResetSession(protocol::ResetSession {}),
+    )));
+    let representations = response(engine.handle(envelope(
+        5,
+        Payload::KeyEvent(protocol::KeyEvent {
+            text: "ABC".into(),
+            ..Default::default()
+        }),
+    )));
+    assert!(
+        representations
+            .candidates
+            .iter()
+            .any(|candidate| candidate.text == "ＡＢＣ")
     );
 }
 

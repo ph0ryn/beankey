@@ -12,12 +12,12 @@ use beankey_converter::{
     InputTableId, InputTableRegistry, KeyboardLanguage, LearningError, LearningMemory,
     LearningMode, NormalConverter, PostCompositionPrediction, PostCompositionPredictor,
     PredictionMode, RequestOptions, SelectionError, TextReplacer, TextReplacerError,
-    ZenzLanguageModel, ZenzVersionConfig,
+    TypoCorrectionMode, ZenzLanguageModel, ZenzVersionConfig,
 };
 use beankey_llama::LlamaError;
 use serde::Deserialize;
 
-use crate::config::{ConversionConfig, DaemonConfig};
+use crate::config::{ConversionConfig, DaemonConfig, PredictionConfig, TypoCorrectionConfig};
 use crate::protocol::composing_count::Count;
 use crate::protocol::envelope::Payload;
 use crate::protocol::protocol_error::Code;
@@ -44,6 +44,7 @@ struct SessionState {
     request_options: RequestOptions,
     last_committed: Option<beankey_converter::Candidate>,
     post_predictions: Vec<PostCompositionPrediction>,
+    live_candidate: Option<beankey_converter::Candidate>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -67,6 +68,8 @@ pub struct Engine {
     text_replacer: Option<TextReplacer>,
     user_dictionary: Vec<DictionaryEntry>,
     user_dictionary_directory: Option<PathBuf>,
+    request_options: RequestOptions,
+    live_conversion: bool,
 }
 
 #[derive(Debug)]
@@ -203,6 +206,8 @@ impl Engine {
             text_replacer: None,
             user_dictionary: Vec::new(),
             user_dictionary_directory: None,
+            request_options: default_request_options(),
+            live_conversion: false,
         })
     }
 
@@ -242,6 +247,7 @@ impl Engine {
         engine.load_learning(learning_directory)?;
         engine.load_text_replacer(&config.emoji_dictionary)?;
         engine.load_conversion_resources(&config.conversion)?;
+        engine.apply_conversion_options(&config.conversion);
         Ok(engine)
     }
 
@@ -279,6 +285,7 @@ impl Engine {
     ) -> Result<Self, EngineOpenError> {
         let mut engine = Self::open(dictionary_path)?;
         engine.load_conversion_resources(conversion)?;
+        engine.apply_conversion_options(conversion);
         Ok(engine)
     }
 
@@ -360,6 +367,20 @@ impl Engine {
                 .register(name.clone(), InputTable::from_custom_tsv(&source));
         }
         Ok(())
+    }
+
+    fn apply_conversion_options(&mut self, conversion: &ConversionConfig) {
+        self.request_options = RequestOptions {
+            n_best: conversion.n_best,
+            japanese_prediction: prediction_mode(conversion.japanese_prediction),
+            full_width_roman: conversion.full_width_roman,
+            half_width_kana: conversion.half_width_kana,
+            typo_correction: typo_correction_mode(conversion.typo_correction),
+            foreign_prediction: prediction_mode(conversion.foreign_prediction),
+            typography: conversion.typography,
+            ..default_request_options()
+        };
+        self.live_conversion = conversion.live_conversion;
     }
 
     pub fn handle(&mut self, envelope: protocol::Envelope) -> protocol::Envelope {
@@ -453,13 +474,12 @@ impl Engine {
                         selected_candidate: 0,
                         surrounding,
                         request_options: RequestOptions {
-                            foreign_prediction: PredictionMode::Automatic,
                             keyboard_language,
-                            version_string: Some(format!("beankey {}", env!("CARGO_PKG_VERSION"))),
-                            ..RequestOptions::default()
+                            ..self.request_options.clone()
                         },
                         last_committed: None,
                         post_predictions: Vec::new(),
+                        live_candidate: None,
                     },
                 );
                 state_envelope(
@@ -526,6 +546,7 @@ impl Engine {
                 session.selected_candidate = 0;
                 session.last_committed = None;
                 session.post_predictions.clear();
+                session.live_candidate = None;
                 Ok(protocol::StateResponse {
                     reset: true,
                     ..Default::default()
@@ -563,6 +584,7 @@ impl Engine {
                         "invalid candidate page request",
                     );
                 }
+                session.live_candidate = None;
                 Ok(make_state(&session, true, String::new(), false))
             }
             Payload::CommitComposition(_) => {
@@ -572,6 +594,7 @@ impl Engine {
                 session.selected_candidate = 0;
                 session.last_committed = None;
                 session.post_predictions.clear();
+                session.live_candidate = None;
                 Ok(protocol::StateResponse {
                     consumed,
                     commit,
@@ -595,6 +618,7 @@ impl Engine {
                     session.selected_candidate = 0;
                     session.last_committed = None;
                     session.post_predictions.clear();
+                    session.live_candidate = None;
                 }
                 error_envelope(request_id, session_id, code, message)
             }
@@ -630,6 +654,7 @@ impl Engine {
                 session.selected_candidate = 0;
                 session.last_committed = None;
                 session.post_predictions.clear();
+                session.live_candidate = None;
                 return Ok(protocol::StateResponse {
                     consumed: true,
                     reset: true,
@@ -640,6 +665,7 @@ impl Engine {
                 if session.conversion.candidates().is_empty() {
                     let commit = session.conversion.composing().surface();
                     session.conversion.reset();
+                    session.live_candidate = None;
                     return Ok(protocol::StateResponse {
                         consumed: true,
                         commit,
@@ -654,6 +680,7 @@ impl Engine {
             }
             KEY_SPACE if !session.conversion.composing().is_empty() => {
                 if !session.conversion.candidates().is_empty() {
+                    session.live_candidate = None;
                     session.selected_candidate =
                         (session.selected_candidate + 1) % session.conversion.candidates().len();
                     return Ok(make_state(session, true, String::new(), false));
@@ -666,6 +693,7 @@ impl Engine {
             }
             KEY_UP | KEY_DOWN if active_candidate_count(session) > 0 => {
                 let count = active_candidate_count(session);
+                session.live_candidate = None;
                 session.selected_candidate = if event.key_sym == KEY_UP {
                     session
                         .selected_candidate
@@ -679,6 +707,7 @@ impl Engine {
             _ if !event.text.is_empty() => {
                 session.last_committed = None;
                 session.post_predictions.clear();
+                session.live_candidate = None;
                 if matches!(session.input_style, ConverterInputStyle::Mapped(_))
                     && (!event.input.is_empty() || !event.intention.is_empty())
                 {
@@ -707,12 +736,14 @@ impl Engine {
             _ if post_candidate_count > 0 => {
                 session.last_committed = None;
                 session.post_predictions.clear();
+                session.live_candidate = None;
                 return Ok(make_state(session, false, String::new(), true));
             }
             _ => return Ok(make_state(session, false, String::new(), false)),
         }
 
         session.selected_candidate = 0;
+        session.live_candidate = None;
         if !session.conversion.composing().is_empty() {
             self.request_candidates(session)?;
         }
@@ -758,6 +789,7 @@ impl Engine {
             )
         })?;
         session.selected_candidate = 0;
+        session.live_candidate = None;
         if !session.conversion.composing().is_empty() {
             session.last_committed = None;
             session.post_predictions.clear();
@@ -812,6 +844,7 @@ impl Engine {
             })?;
         }
         session.selected_candidate = 0;
+        session.live_candidate = None;
         session.last_committed = Some(joined.clone());
         session.post_predictions = if prediction.is_terminal {
             Vec::new()
@@ -867,6 +900,7 @@ impl Engine {
                 )
             })?;
         session.selected_candidate = 0;
+        session.live_candidate = None;
         self.request_candidates(session)?;
         Ok(make_state(session, true, String::new(), false))
     }
@@ -882,6 +916,7 @@ impl Engine {
             )
         })?;
         session.selected_candidate = 0;
+        session.live_candidate = None;
         if !session.conversion.composing().is_empty() {
             self.request_candidates(session)?;
         }
@@ -933,6 +968,27 @@ impl Engine {
                     )
                 })?;
         }
+        let live_candidate = if self.live_conversion && session.conversion.composing().is_at_end() {
+            session
+                .conversion
+                .request_live_conversion(&converter, &self.tables)
+                .map_err(|error| (Code::Internal, format!("live conversion failed: {error}")))?
+        } else {
+            None
+        };
+        if let Some(live_candidate) = &live_candidate
+            && let Some(index) = session
+                .conversion
+                .candidates()
+                .iter()
+                .position(|candidate| {
+                    candidate.text == live_candidate.text
+                        && candidate.composing_count == live_candidate.composing_count
+                })
+        {
+            session.selected_candidate = index;
+        }
+        session.live_candidate = live_candidate;
         Ok(())
     }
 }
@@ -1008,6 +1064,30 @@ fn keyboard_language(value: i32) -> Option<KeyboardLanguage> {
     }
 }
 
+fn prediction_mode(value: PredictionConfig) -> PredictionMode {
+    match value {
+        PredictionConfig::Automatic => PredictionMode::Automatic,
+        PredictionConfig::Manual => PredictionMode::Manual,
+        PredictionConfig::Disabled => PredictionMode::Disabled,
+    }
+}
+
+fn default_request_options() -> RequestOptions {
+    RequestOptions {
+        foreign_prediction: PredictionMode::Automatic,
+        version_string: Some(format!("beankey {}", env!("CARGO_PKG_VERSION"))),
+        ..RequestOptions::default()
+    }
+}
+
+fn typo_correction_mode(value: TypoCorrectionConfig) -> TypoCorrectionMode {
+    match value {
+        TypoCorrectionConfig::Enabled => TypoCorrectionMode::Enabled,
+        TypoCorrectionConfig::Automatic => TypoCorrectionMode::Automatic,
+        TypoCorrectionConfig::Disabled => TypoCorrectionMode::Disabled,
+    }
+}
+
 fn to_katakana(value: &str) -> String {
     value
         .chars()
@@ -1056,10 +1136,24 @@ fn make_state(
     commit: String,
     reset: bool,
 ) -> protocol::StateResponse {
+    let (preedit, preedit_cursor) = session.live_candidate.as_ref().map_or_else(
+        || {
+            (
+                session.conversion.composing().surface(),
+                session.conversion.composing().cursor() as u32,
+            )
+        },
+        |candidate| {
+            (
+                candidate.text.clone(),
+                candidate.text.chars().count().min(u32::MAX as usize) as u32,
+            )
+        },
+    );
     protocol::StateResponse {
         consumed,
-        preedit: session.conversion.composing().surface(),
-        preedit_cursor: session.conversion.composing().cursor() as u32,
+        preedit,
+        preedit_cursor,
         candidates: if session.conversion.composing().is_empty()
             && !session.post_predictions.is_empty()
         {
