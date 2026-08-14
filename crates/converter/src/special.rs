@@ -42,6 +42,121 @@ pub fn special_candidates(
     output
 }
 
+pub fn typographical_candidates(composing: &ComposingText) -> Vec<Candidate> {
+    let text = to_katakana(&composing.surface());
+    if text.is_empty()
+        || !text
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric())
+    {
+        return Vec::new();
+    }
+    let only_letters = text
+        .chars()
+        .all(|character| character.is_ascii_alphabetic());
+    let mut values = vec![styled(&text, 119_743, 119_737, Some(120_734), &[])];
+    if only_letters {
+        values.push(styled(&text, 119_795, 119_789, None, &[('h', 'ℎ')]));
+        values.push(styled(&text, 119_847, 119_841, None, &[]));
+        values.push(styled(
+            &text,
+            119_899,
+            119_893,
+            None,
+            &[
+                ('B', 'ℬ'),
+                ('E', 'ℰ'),
+                ('F', 'ℱ'),
+                ('H', 'ℋ'),
+                ('I', 'ℐ'),
+                ('L', 'ℒ'),
+                ('M', 'ℳ'),
+                ('R', 'ℛ'),
+                ('e', 'ℯ'),
+                ('g', 'ℊ'),
+                ('o', 'ℴ'),
+            ],
+        ));
+        values.push(styled(&text, 119_951, 119_945, None, &[]));
+        values.push(styled(
+            &text,
+            120_003,
+            119_997,
+            None,
+            &[('C', 'ℭ'), ('H', 'ℌ'), ('I', 'ℑ'), ('R', 'ℜ'), ('Z', 'ℨ')],
+        ));
+    }
+    values.push(styled(
+        &text,
+        120_055,
+        120_049,
+        Some(120_744),
+        &[
+            ('C', 'ℂ'),
+            ('H', 'ℍ'),
+            ('N', 'ℕ'),
+            ('P', 'ℙ'),
+            ('Q', 'ℚ'),
+            ('R', 'ℝ'),
+            ('Z', 'ℤ'),
+        ],
+    ));
+    if only_letters {
+        values.push(styled(&text, 120_107, 120_101, None, &[]));
+    }
+    values.push(styled(&text, 120_159, 120_153, Some(120_754), &[]));
+    values.push(styled(&text, 120_211, 120_205, Some(120_764), &[]));
+    if only_letters {
+        values.push(styled(&text, 120_263, 120_257, None, &[]));
+        values.push(styled(&text, 120_315, 120_309, None, &[]));
+    }
+    values.push(styled(&text, 120_367, 120_361, Some(120_774), &[]));
+    values
+        .into_iter()
+        .map(|value| {
+            candidate(
+                value,
+                text.clone(),
+                -15.0,
+                ComposingCount::Input(composing.input().len()),
+                PROPER_NOUN_ID,
+                GENERAL_MEANING_ID,
+                true,
+            )
+        })
+        .collect()
+}
+
+fn styled(
+    text: &str,
+    uppercase_offset: u32,
+    lowercase_offset: u32,
+    number_offset: Option<u32>,
+    exceptions: &[(char, char)],
+) -> String {
+    text.chars()
+        .map(|character| {
+            if let Some((_, replacement)) =
+                exceptions.iter().find(|(source, _)| *source == character)
+            {
+                return *replacement;
+            }
+            let offset = if character.is_ascii_uppercase() {
+                Some(uppercase_offset)
+            } else if character.is_ascii_lowercase() {
+                Some(lowercase_offset)
+            } else if character.is_ascii_digit() {
+                number_offset
+            } else {
+                None
+            };
+            offset
+                .and_then(|offset| char::from_u32(u32::from(character) + offset))
+                .unwrap_or(character)
+        })
+        .collect()
+}
+
 fn calendar_candidates(composing: &ComposingText) -> Vec<Candidate> {
     let ruby = to_katakana(&composing.surface());
     let input_count = ComposingCount::Input(composing.input().len());
@@ -350,5 +465,25 @@ mod tests {
             special_candidates(&composing("ばーじょん"), Some("beankey 0.1"))[0].text,
             "beankey 0.1"
         );
+    }
+
+    #[test]
+    fn generates_the_optional_fixed_typography_styles() {
+        let letters = typographical_candidates(&composing("Beh"));
+        assert_eq!(letters.len(), 13);
+        assert_eq!(letters[0].text, "𝐁𝐞𝐡");
+        assert_eq!(letters[1].text, "𝐵𝑒ℎ");
+        assert_eq!(letters[3].text, "ℬℯ𝒽");
+
+        let alphanumeric = typographical_candidates(&composing("Az0"));
+        assert_eq!(alphanumeric.len(), 5);
+        assert_eq!(
+            alphanumeric
+                .iter()
+                .map(|candidate| candidate.text.as_str())
+                .collect::<Vec<_>>(),
+            ["𝐀𝐳𝟎", "𝔸𝕫𝟘", "𝖠𝗓𝟢", "𝗔𝘇𝟬", "𝙰𝚣𝟶"]
+        );
+        assert!(typographical_candidates(&composing("日本語")).is_empty());
     }
 }

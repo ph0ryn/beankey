@@ -37,6 +37,7 @@ pub struct RequestOptions {
     pub typo_correction: TypoCorrectionMode,
     pub foreign_prediction: PredictionMode,
     pub keyboard_language: crate::KeyboardLanguage,
+    pub typography: bool,
 }
 
 impl Default for RequestOptions {
@@ -50,6 +51,7 @@ impl Default for RequestOptions {
             typo_correction: TypoCorrectionMode::Automatic,
             foreign_prediction: PredictionMode::Disabled,
             keyboard_language: crate::KeyboardLanguage::None,
+            typography: false,
         }
     }
 }
@@ -461,6 +463,9 @@ impl ConversionSession {
         words.retain(|candidate| seen.insert(candidate.text.clone()));
         let mut special =
             crate::special_candidates(&self.composing, options.version_string.as_deref());
+        if options.typography {
+            special.extend(crate::typographical_candidates(&self.composing));
+        }
         special.retain(|candidate| seen.insert(candidate.text.clone()));
         words.splice(5.min(words.len())..5.min(words.len()), special);
 

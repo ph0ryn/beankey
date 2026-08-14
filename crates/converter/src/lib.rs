@@ -32,6 +32,6 @@ pub use session::{
     ConversionResult, ConversionSession, PredictionMode, RequestOptions, SelectionError,
     TypoCorrectionMode,
 };
-pub use special::special_candidates;
+pub use special::{special_candidates, typographical_candidates};
 pub use template::expand_templates;
 pub use text_replacer::{ReplacementCandidate, TextReplacer, TextReplacerError, TextSearchResult};
