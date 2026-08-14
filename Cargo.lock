@@ -50,6 +50,7 @@ dependencies = [
 name = "beankey-daemon"
 version = "0.1.0"
 dependencies = [
+ "beankey-converter",
  "prost",
  "prost-build",
 ]

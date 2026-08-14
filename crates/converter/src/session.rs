@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::error::Error;
 use std::fmt;
 use std::sync::Arc;
@@ -7,8 +8,9 @@ use unicode_segmentation::UnicodeSegmentation;
 use crate::foreign::{ForeignCompletionProvider, foreign_predictions};
 use crate::{
     Candidate, ComposingCount, ComposingText, ConversionContext, DictionaryEntry, DictionaryError,
-    DictionaryMetadata, InputStyle, InputTableRegistry, LearningError, LearningMemory,
-    NormalConverter, PostCompositionPrediction, PostCompositionPredictor, UserDictionary,
+    DictionaryMetadata, InputElement, InputModifier, InputPiece, InputStyle, InputTableRegistry,
+    LearningError, LearningMemory, NormalConverter, PostCompositionPrediction,
+    PostCompositionPredictor, UserDictionary,
 };
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -243,6 +245,29 @@ impl ConversionSession {
         tables: &InputTableRegistry,
     ) {
         self.composing.insert_str(value, input_style, tables);
+        self.candidates.clear();
+        self.last_committed = None;
+    }
+
+    pub fn insert_key(
+        &mut self,
+        intention: Option<String>,
+        input: impl Into<String>,
+        modifiers: impl IntoIterator<Item = InputModifier>,
+        input_style: InputStyle,
+        tables: &InputTableRegistry,
+    ) {
+        self.composing.insert(
+            vec![InputElement::new(
+                InputPiece::Key {
+                    intention,
+                    input: input.into(),
+                    modifiers: BTreeSet::from_iter(modifiers),
+                },
+                input_style,
+            )],
+            tables,
+        );
         self.candidates.clear();
         self.last_committed = None;
     }

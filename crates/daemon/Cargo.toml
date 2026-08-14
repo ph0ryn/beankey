@@ -6,6 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+beankey-converter = { path = "../converter" }
 prost.workspace = true
 
 [build-dependencies]
