@@ -1,8 +1,10 @@
 use std::error::Error;
 use std::fmt;
 
+use unicode_segmentation::UnicodeSegmentation;
+
 use crate::{
-    Candidate, ComposingText, ConversionContext, DictionaryEntry, DictionaryError,
+    Candidate, ComposingCount, ComposingText, ConversionContext, DictionaryEntry, DictionaryError,
     DictionaryMetadata, InputStyle, InputTableRegistry, LearningError, LearningMemory,
     NormalConverter, PostCompositionPrediction, PostCompositionPredictor, UserDictionary,
 };
@@ -118,6 +120,20 @@ pub struct ConversionSession {
     file_user_dictionary: UserDictionary,
     learning_memory: Option<LearningMemory>,
     learned_dictionary: Vec<DictionaryEntry>,
+    stable_prediction_cache: Option<StablePredictionCache>,
+}
+
+#[derive(Clone)]
+struct StablePredictionCache {
+    original_surface: String,
+    suffix_count: usize,
+    candidates: Vec<Candidate>,
+}
+
+struct PredictiveInputSource {
+    base_surface: String,
+    possible_nexts: Vec<String>,
+    dropped_suffix_count: usize,
 }
 
 impl ConversionSession {
@@ -276,13 +292,13 @@ impl ConversionSession {
     }
 
     pub fn request_predictions(
-        &self,
+        &mut self,
         converter: &NormalConverter<'_>,
         tables: &InputTableRegistry,
         n_best: usize,
     ) -> Result<Vec<Candidate>, DictionaryError> {
         let additional = self.additional_dictionary();
-        converter.predict_with_entries(&self.composing, tables, n_best, self.context, &additional)
+        self.predictions(converter, tables, n_best, &additional)
     }
 
     pub fn request_live_conversion(
@@ -327,9 +343,10 @@ impl ConversionSession {
         first_clauses.truncate(5);
 
         let predictions = if options.japanese_prediction == PredictionMode::Disabled {
+            self.stable_prediction_cache = None;
             Vec::new()
         } else {
-            converter.predict_with_entries(&self.composing, tables, 3, self.context, &additional)?
+            self.predictions(converter, tables, 3, &additional)?
         };
         let mut leading: Vec<_> = full.iter().take(5).cloned().collect();
         let katakana = to_katakana(&self.composing.surface());
@@ -480,6 +497,156 @@ impl ConversionSession {
         self.candidates.clear();
         self.context = ConversionContext::default();
         self.last_committed = None;
+        self.stable_prediction_cache = None;
+    }
+
+    fn predictions(
+        &mut self,
+        converter: &NormalConverter<'_>,
+        tables: &InputTableRegistry,
+        n_best: usize,
+        additional: &[DictionaryEntry],
+    ) -> Result<Vec<Candidate>, DictionaryError> {
+        if n_best == 0 {
+            self.stable_prediction_cache = None;
+            return Ok(Vec::new());
+        }
+        let source = predictive_input_source(&self.composing, tables);
+        let stable = self
+            .stable_prediction_cache
+            .as_ref()
+            .map(|cache| cache.compatible_candidates(&self.composing, &source))
+            .unwrap_or_default();
+        let fresh = converter.predict_with_entries(
+            &self.composing,
+            tables,
+            n_best,
+            self.context,
+            additional,
+        )?;
+        let mut predictions = unique(stable);
+        let mut seen = predictions
+            .iter()
+            .map(|candidate| candidate.text.clone())
+            .collect::<std::collections::HashSet<_>>();
+        predictions.extend(
+            fresh
+                .into_iter()
+                .filter(|candidate| seen.insert(candidate.text.clone())),
+        );
+        predictions.truncate(n_best);
+        if predictions.is_empty() {
+            self.stable_prediction_cache = None;
+        } else {
+            self.stable_prediction_cache = Some(StablePredictionCache {
+                original_surface: self.composing.surface(),
+                suffix_count: source.dropped_suffix_count,
+                candidates: predictions.clone(),
+            });
+        }
+        Ok(predictions)
+    }
+}
+
+impl StablePredictionCache {
+    fn compatible_candidates(
+        &self,
+        composing: &ComposingText,
+        source: &PredictiveInputSource,
+    ) -> Vec<Candidate> {
+        let original_count =
+            UnicodeSegmentation::graphemes(self.original_surface.as_str(), true).count();
+        let retained_count = original_count.saturating_sub(self.suffix_count);
+        let cached_base = UnicodeSegmentation::graphemes(self.original_surface.as_str(), true)
+            .take(retained_count)
+            .collect::<String>();
+        if !source.base_surface.starts_with(&cached_base) {
+            return Vec::new();
+        }
+        let current_surface = composing.surface();
+        let current_ruby = to_katakana(&current_surface);
+        let compatible_prefixes = if source.possible_nexts.is_empty() {
+            vec![current_ruby.clone()]
+        } else {
+            source
+                .possible_nexts
+                .iter()
+                .map(|suffix| format!("{}{suffix}", to_katakana(&source.base_surface)))
+                .collect()
+        };
+        let consumed = composing.surface_graphemes().len();
+        self.candidates
+            .iter()
+            .filter(|candidate| {
+                let ruby = candidate
+                    .entries
+                    .iter()
+                    .map(|entry| entry.ruby.as_str())
+                    .collect::<String>();
+                !candidate.text.is_empty()
+                    && ruby != current_ruby
+                    && compatible_prefixes
+                        .iter()
+                        .any(|prefix| ruby.starts_with(prefix))
+            })
+            .cloned()
+            .map(|mut candidate| {
+                candidate.composing_count = ComposingCount::Surface(consumed);
+                candidate
+            })
+            .collect()
+    }
+}
+
+fn predictive_input_source(
+    composing: &ComposingText,
+    tables: &InputTableRegistry,
+) -> PredictiveInputSource {
+    let surface = composing.surface();
+    let Some(style) = composing.input().last().map(|element| &element.input_style) else {
+        return PredictiveInputSource {
+            base_surface: surface,
+            possible_nexts: Vec::new(),
+            dropped_suffix_count: 0,
+        };
+    };
+    if matches!(style, InputStyle::Direct) {
+        return PredictiveInputSource {
+            base_surface: surface,
+            possible_nexts: Vec::new(),
+            dropped_suffix_count: 0,
+        };
+    }
+    let suffix_count = surface
+        .chars()
+        .rev()
+        .take_while(|character| character.is_ascii_alphabetic())
+        .count();
+    if suffix_count == 0 {
+        return PredictiveInputSource {
+            base_surface: surface,
+            possible_nexts: Vec::new(),
+            dropped_suffix_count: 0,
+        };
+    }
+    let suffix_start = surface.len() - suffix_count;
+    let suffix = &surface[suffix_start..];
+    let possible_nexts = tables
+        .resolve(style)
+        .map(|table| table.possible_nexts(suffix))
+        .unwrap_or_default();
+    if possible_nexts.is_empty() {
+        PredictiveInputSource {
+            base_surface: surface,
+            possible_nexts,
+            dropped_suffix_count: 0,
+        }
+    } else {
+        PredictiveInputSource {
+            base_surface: surface[..suffix_start].to_owned(),
+            possible_nexts,
+            dropped_suffix_count: suffix_count,
+        }
     }
 }
 
