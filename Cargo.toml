@@ -1,2 +1,11 @@
 [workspace]
+members = ["crates/converter"]
 resolver = "3"
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+rust-version = "1.85"
+
+[workspace.dependencies]
+unicode-segmentation = "1.12.0"
