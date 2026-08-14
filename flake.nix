@@ -390,6 +390,7 @@
             grep -F 'model = "${self.packages.${system}.model}/share/beankey/model/ggml-model-Q5_K_M.gguf"' "$config"
             grep -F 'llama_backend_directory = "${self.packages.${system}.daemon.llamaCpp}/bin"' "$config"
             grep -F 'runtime_socket = "beankey/daemon.sock"' "$config"
+            grep -F 'keyboard_language = "japanese"' "$config"
             touch "$out"
           '';
         }

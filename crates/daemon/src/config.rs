@@ -31,6 +31,7 @@ pub struct DaemonConfig {
 pub struct ConversionConfig {
     pub input_style: InputStyleConfig,
     pub custom_input_table: Option<String>,
+    pub keyboard_language: KeyboardLanguageConfig,
     pub n_best: usize,
     pub japanese_prediction: PredictionConfig,
     pub foreign_prediction: PredictionConfig,
@@ -49,6 +50,7 @@ impl Default for ConversionConfig {
         Self {
             input_style: InputStyleConfig::RomanToKana,
             custom_input_table: None,
+            keyboard_language: KeyboardLanguageConfig::Japanese,
             n_best: 10,
             japanese_prediction: PredictionConfig::Automatic,
             foreign_prediction: PredictionConfig::Automatic,
@@ -62,6 +64,16 @@ impl Default for ConversionConfig {
             custom_input_tables: BTreeMap::new(),
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum KeyboardLanguageConfig {
+    None,
+    #[default]
+    Japanese,
+    EnglishUs,
+    Greek,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
@@ -354,6 +366,7 @@ greek_dictionary = "/nix/store/el_GR"
 
 [conversion]
 input_style = "roman_to_kana"
+keyboard_language = "japanese"
 n_best = 10
 japanese_prediction = "automatic"
 foreign_prediction = "automatic"
@@ -393,6 +406,10 @@ flash_attention = true
         assert_eq!(config.runtime_socket, Path::new("beankey/daemon.sock"));
         assert_eq!(config.inference.context_size, 512);
         assert_eq!(config.zenz.inference_limit, 10);
+        assert_eq!(
+            config.conversion.keyboard_language,
+            KeyboardLanguageConfig::Japanese
+        );
     }
 
     #[test]

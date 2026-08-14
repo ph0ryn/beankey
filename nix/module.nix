@@ -84,6 +84,7 @@ let
 
   conversionConfig = {
     input_style = cfg.conversion.inputStyle;
+    keyboard_language = cfg.conversion.keyboardLanguage;
     n_best = cfg.conversion.candidateCount;
     japanese_prediction = cfg.conversion.japanesePrediction;
     foreign_prediction = cfg.conversion.foreignPrediction;
@@ -175,6 +176,16 @@ in
         description = "Default input style.";
       };
       customInputTable = optionalString "Name of the default custom input table.";
+      keyboardLanguage = mkOption {
+        type = types.enum [
+          "none"
+          "japanese"
+          "english_us"
+          "greek"
+        ];
+        default = "japanese";
+        description = "Keyboard language used for foreign word completion.";
+      };
       candidateCount = mkOption {
         type = types.ints.positive;
         default = 10;

@@ -19,8 +19,8 @@ use beankey_llama::LlamaError;
 use serde::Deserialize;
 
 use crate::config::{
-    ConversionConfig, DaemonConfig, InputStyleConfig, LmTypoLanguageModel, PredictionConfig,
-    TypoCorrectionConfig,
+    ConversionConfig, DaemonConfig, InputStyleConfig, KeyboardLanguageConfig, LmTypoLanguageModel,
+    PredictionConfig, TypoCorrectionConfig,
 };
 use crate::protocol::composing_count::Count;
 use crate::protocol::envelope::Payload;
@@ -81,6 +81,7 @@ pub struct Engine {
     request_options: RequestOptions,
     live_conversion: bool,
     default_input_style: ConverterInputStyle,
+    default_keyboard_language: KeyboardLanguage,
 }
 
 #[derive(Debug)]
@@ -235,6 +236,7 @@ impl Engine {
             request_options: default_request_options(),
             live_conversion: false,
             default_input_style: ConverterInputStyle::RomanToKana,
+            default_keyboard_language: KeyboardLanguage::Japanese,
         })
     }
 
@@ -431,6 +433,12 @@ impl Engine {
                 ConverterInputStyle::Mapped(InputTableId::Named(name.clone()))
             }
         };
+        self.default_keyboard_language = match conversion.keyboard_language {
+            KeyboardLanguageConfig::None => KeyboardLanguage::None,
+            KeyboardLanguageConfig::Japanese => KeyboardLanguage::Japanese,
+            KeyboardLanguageConfig::EnglishUs => KeyboardLanguage::EnglishUs,
+            KeyboardLanguageConfig::Greek => KeyboardLanguage::Greek,
+        };
         Ok(())
     }
 
@@ -555,7 +563,15 @@ impl Engine {
                         );
                     }
                 };
-                let Some(keyboard_language) = keyboard_language(start.keyboard_language) else {
+                let keyboard_language =
+                    if protocol::KeyboardLanguage::try_from(start.keyboard_language)
+                        == Ok(protocol::KeyboardLanguage::Unspecified)
+                    {
+                        Some(self.default_keyboard_language)
+                    } else {
+                        keyboard_language(start.keyboard_language)
+                    };
+                let Some(keyboard_language) = keyboard_language else {
                     return error_envelope(
                         request_id,
                         session_id,
@@ -1272,9 +1288,8 @@ fn input_style(
 
 fn keyboard_language(value: i32) -> Option<KeyboardLanguage> {
     match protocol::KeyboardLanguage::try_from(value).ok()? {
-        protocol::KeyboardLanguage::Unspecified | protocol::KeyboardLanguage::Japanese => {
-            Some(KeyboardLanguage::Japanese)
-        }
+        protocol::KeyboardLanguage::Unspecified => None,
+        protocol::KeyboardLanguage::Japanese => Some(KeyboardLanguage::Japanese),
         protocol::KeyboardLanguage::EnglishUs => Some(KeyboardLanguage::EnglishUs),
         protocol::KeyboardLanguage::Greek => Some(KeyboardLanguage::Greek),
     }
@@ -1502,9 +1517,71 @@ fn error_envelope(
 
 #[cfg(test)]
 mod tests {
-    use beankey_converter::{ZenzV3Config, ZenzVersionConfig};
+    use beankey_converter::{ForeignLanguage, ZenzV3Config, ZenzVersionConfig};
 
     use super::*;
+
+    struct GreekCompleter;
+
+    impl ForeignCompletionProvider for GreekCompleter {
+        fn completions(&self, language: ForeignLanguage, input: &str) -> Vec<String> {
+            if language == ForeignLanguage::Greek && input == "καλ" {
+                vec!["καλά".into()]
+            } else {
+                Vec::new()
+            }
+        }
+    }
+
+    #[test]
+    fn uses_the_configured_keyboard_language_for_unspecified_sessions() {
+        let dictionary = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("data/azooKey_dictionary_storage/Dictionary");
+        let mut engine = Engine::open(dictionary).unwrap();
+        engine.foreign_completion_provider = Some(Arc::new(GreekCompleter));
+        engine
+            .apply_conversion_options(&ConversionConfig {
+                input_style: InputStyleConfig::Direct,
+                keyboard_language: KeyboardLanguageConfig::Greek,
+                ..Default::default()
+            })
+            .unwrap();
+        let envelope = |request_id, payload| protocol::Envelope {
+            protocol_version: PROTOCOL_VERSION,
+            request_id,
+            session_id: "greek".into(),
+            payload: Some(payload),
+            trace: Vec::new(),
+        };
+        engine.handle(envelope(
+            1,
+            Payload::StartSession(protocol::StartSession {
+                input_style: protocol::InputStyle::Unspecified as i32,
+                surrounding_text: None,
+                keyboard_language: protocol::KeyboardLanguage::Unspecified as i32,
+                custom_input_table: String::new(),
+            }),
+        ));
+
+        let response = engine.handle(envelope(
+            2,
+            Payload::KeyEvent(protocol::KeyEvent {
+                text: "καλ".into(),
+                ..Default::default()
+            }),
+        ));
+        let Payload::StateResponse(state) = response.payload.unwrap() else {
+            panic!("conversion did not return state");
+        };
+
+        assert!(
+            state
+                .candidates
+                .iter()
+                .any(|candidate| candidate.text == "καλά")
+        );
+    }
 
     #[test]
     fn splits_fcitx_surrounding_text_around_the_selection() {

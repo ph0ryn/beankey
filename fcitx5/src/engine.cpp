@@ -177,7 +177,7 @@ bool BeankeyState::start() {
   auto request = envelope();
   auto *start = request.mutable_start_session();
   start->set_input_style(beankey::v1::INPUT_STYLE_UNSPECIFIED);
-  start->set_keyboard_language(beankey::v1::KEYBOARD_LANGUAGE_JAPANESE);
+  start->set_keyboard_language(beankey::v1::KEYBOARD_LANGUAGE_UNSPECIFIED);
   fillSurroundingText(start->mutable_surrounding_text());
   const auto response =
       engine_->client().request(request, engine_->requestTimeout());
