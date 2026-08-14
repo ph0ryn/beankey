@@ -1,6 +1,6 @@
 # NixOS向けZenzai対応かな漢字変換システム 仕様書
 
-- 文書状態: Draft
+- 文書状態: 実装・正常動作確認済み
 - 作成日: 2026-08-14
 - 関連文書: [architecture.md](./architecture.md)
 - 原作調査: [research.md](./research.md)
@@ -113,7 +113,7 @@ top-1候補の一致だけで、原作と同等とは判定しない。候補列
 
 NixOS moduleは`programs.beankey.enable`を公開する。今後、利用者が変更する必要のある設定が確定した場合も、すべて`programs.beankey = { ... };`配下へ追加し、手書きのdaemon設定、設定用環境変数または別namespaceは公開しない。モデルはflakeが固定して導入し、利用者向けoptionにしない。
 
-対応するシステムアーキテクチャ、表示環境、対象アプリケーションは未決事項とする。
+現在の対応・受け入れ確認環境は`x86_64-linux`、NixOS 26.11、Fcitx5 5.1.21、X11、GTK 4アプリケーションとする。X11の確認には隔離したXvfb displayとZenityを使用した。Waylandおよび他のsystem architectureは、package出力が存在する場合も受け入れ確認済みとは扱わない。
 
 ### かな漢字変換エンジン
 
@@ -161,6 +161,32 @@ Zenzaiは単純な候補リランカーとして実装してはならない。�
 
 Fcitx5連携はfcitx5-mozcと同様に、daemon応答がconsumedとしたキーだけをacceptし、プリエディット、候補および確定結果をFcitx5標準APIへ反映する。daemonとの通信に失敗したキーはbufferまたは再送せず、セッションとUIをresetして未処理としてFcitx5へ返す。
 
+## 現在の正常動作検証
+
+2026-08-15に、NixOS 26.11、Linux 6.18.41、`x86_64-linux`、AMD Ryzen 5 4500U、15 GiB RAM、Fcitx5 5.1.21の環境で受け入れ確認を行った。ホストの入力セッションから分離したXvfb上で、Nix packageのFcitx5アドオン、daemon、固定辞書、固定GGUFモデルおよびGTK 4版Zenityを使用した。
+
+### 機能シナリオ
+
+| 機能群 | 外部から確認した正常動作 | 主な検証境界 |
+| --- | --- | --- |
+| 入力状態と入力方式 | 直接入力、ローマ字、AZIK、かなJIS/US、カスタム表、挿入、削除、カーソル移動 | converterの単体テストと`conversion_session_assets` |
+| 辞書と基本変換 | 固定binary/LOUDS辞書、ラティス、全文・文節・単語変換、候補選択、確定 | `dictionary_*_assets`、`normal_conversion_assets`、`conversion_result_assets` |
+| 予測と補完 | 入力中・確定後予測、英語・ギリシャ語、絵文字 | `input_prediction_assets`、`post_composition_prediction_assets`、`foreign_prediction_assets`、`emoji_assets` |
+| 学習と拡張候補 | 学習、忘却、reset、学習mode、ユーザ辞書、特殊・表記・template候補 | `learning_memory_assets`、`user_dictionary_assets`、`typography_assets`、daemonの`engine_assets` |
+| セッション操作 | live変換、部分確定、残入力の再変換、複数sessionの分離と復旧 | `conversion_session_assets`、daemonの`engine_assets`と`server_assets` |
+| Zenzai | 通常・rich・personalization・次入力予測、LM誤入力訂正、model prefixによる制約付き再探索 | `zenz_*_assets`、daemonの`zenz_model_assets` |
+| Fcitx5 | addonからのdaemon直接起動、プリエディット、候補1の選択、`司会`の確定 | 隔離した実Fcitx5・GTK 4アプリケーション |
+| 障害復旧 | 入力途中でdaemonを`SIGKILL`してもFcitx5とアプリケーションが継続し、次のキー`x`を未処理のままアプリケーションへ返した | 隔離した実Fcitx5・GTK 4アプリケーション |
+
+固定モデルを使うNix package testでは、flakeが固定する`ggml-model-Q5_K_M.gguf`と`pkgs.llama-cpp` 10273を実際にロードし、context 512、batch 512、microbatch 64、flash attention有効で辞書draft、model評価、prefix制約付き再探索から変換結果を得た。server executableも同じNixOS資産で要求を処理した。
+
+### 性能と資源
+
+- 入力contextを有効化してから固定モデルを読み込み、最初の要求を受けられるまで435 msだった。
+- 有効化直後のdaemon RSSは180,896 KiBだった。変換2回後は186,148 KiB、4回後は186,176 KiB、6回後は186,188 KiB、8回後と10回後は186,200 KiBで、warm時の継続的な増加はなかった。
+- 10回の変換で記録した81個のconsumed key pressは、最小2 ms、平均34.1 ms、p95 87 ms、最大90 msだった。
+- addonの内部deadlineは5秒であり、計測したcold開始とwarm要求の双方に余裕がある。timeoutまたは切断時はsessionとUIをresetし、そのキーを未処理として返す。
+
 ## 完了条件
 
 次をすべて満たしたときだけ、本プロジェクトを完成と判定する。
@@ -175,13 +201,11 @@ Fcitx5連携はfcitx5-mozcと同様に、daemon応答がconsumedとしたキー�
 8. 原作準拠の推論プロファイルで、cold/warm時の応答時間、メモリおよびモデル読込時間を記録し、実際の入力操作を阻害する停止または無制限な資源増加がない。
 9. 本プロジェクトが直接packageするコードとデータについて、ライセンスおよび再配布条件を満たす。
 
+上記1から9は、本文書の機能シナリオ、性能・資源記録、Nix build/check、closure監査および各資産packageに同梱したlicense・attributionによって満たした。固定原作との候補列、内部traceおよびlogitの厳密比較は、定義どおり後続の適合検証であり、現在の完成判定には含めない。
+
 ## 未決事項
 
-### NixOSとFcitx5
-
-- 対応するシステムアーキテクチャと、実機確認に使う表示環境・対象アプリケーション
-
-未決事項を解決するときは、原作コード、原作テスト、公式API、固定資産、計測結果などの検証可能な根拠を記録する。実装上の都合だけで暗黙に決定してはならない。
+現在の実装と完成判定を妨げる未決事項はない。Wayland、他のsystem architectureおよび固定原作との厳密な出力適合は、現在の受け入れ範囲を拡張するときに別途検証する。
 
 ## 後続作業
 

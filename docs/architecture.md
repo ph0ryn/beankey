@@ -1,6 +1,6 @@
 # NixOS向けZenzai対応かな漢字変換システム アーキテクチャ
 
-- 文書状態: Draft
+- 文書状態: 実装・正常動作確認済み
 - 作成日: 2026-08-14
 - 対象仕様: [spec.md](./spec.md)
 - 原作調査: [research.md](./research.md)
@@ -336,7 +336,7 @@ flowchart TD
 
 デーモンは`$XDG_RUNTIME_DIR/beankey/daemon.lock`をsymlink追跡なしで開き、生存中は排他的なprocess lockを保持する。lockを取得できない競合プロセスは既存socketへの接続を確認して終了し、addon側が同じsocketへの接続を再試行する。lockを取得したプロセスだけが既存socketを検査できる。同一UID所有のUnix socketで接続不能ならstaleと判定してunlinkしてからbindし、symlink、別ownerまたはsocket以外のpathは削除しない。切断されたclientのsessionは破棄し、最後のclientが切断してsessionがなくなったdaemonは終了する。daemonはSIGTERMで新規要求の受理を止め、処理中の要求を終えてsocketを安全に解放する。
 
-一つのsessionでは同時に一要求だけを処理してrequest ID順を保つ。異なるsessionの辞書処理は並行実行できるが、共有llama.cpp contextを使う推論は一つのqueueで直列化する。キーeventはfcitx5-mozcと同じ同期経路で処理するため、addonは各要求へ短いdeadlineを設け、timeout時は接続とsessionを破棄してキーを未処理として返す。deadlineの数値は原作準拠プロファイルを対象環境で計測してから内部設定へ固定し、利用者向けoptionにはしない。
+一つのsessionでは同時に一要求だけを処理してrequest ID順を保つ。異なるsessionの辞書処理は並行実行できるが、共有llama.cpp contextを使う推論は一つのqueueで直列化する。キーeventはfcitx5-mozcと同じ同期経路で処理するため、addonは各要求へ5秒のdeadlineを設け、timeout時は接続とsessionを破棄してキーを未処理として返す。この値は対象環境で計測した435 msのcold開始と最大90 msのwarm key応答に対して余裕を持つ内部定数とし、利用者向けoptionにはしない。
 
 この境界により、llama.cppまたは変換処理の異常をFcitx5から分離する。期限値、終了処理およびFcitx5 event loopとの統合は技術試作で検証し、Fcitx5を長時間blockしないことを確認する。
 
@@ -359,9 +359,15 @@ flowchart TD
 - 絵文字packageには固定emoji submodule `67b822603391b01238d7b80b8b61b63f966cf357`の`data/README.md`を基礎に、byte一致を確認したMozc `4517e51d53063397222adb5512c7ad972b17c181`のBSD-3-Clause全文、Unicode License全文と対象データのcopyright、azooKey独自追加分のMIT全文を含める。packageするのは固定submoduleの生成済み`EmojiDictionary`だけとし、Mozcのsource、library、daemonまたはpackageへ依存しない。
 - 原作fixtureはpackageまたはrepositoryへコピーせず、将来の適合検証では固定原作checkoutから参照する。
 
-現行`flake.nix`の`packages.<system>.model`は`pkgs.fetchurl`のGGUF単体を返す設計段階の出力である。NixOS moduleとmodel packageの実装時に、このfetch結果を唯一のmodel入力としたままlicenseとattributionを添えた最終packageへ置き換える。モデルのURL、hashまたは利用者向け可変性は変更しない。
+`packages.<system>.model`は、flake内の固定`pkgs.fetchurl`を唯一のmodel入力とし、GGUF、Apache-2.0本文およびattributionを格納する。モデルのURL、hashまたは利用者向け可変性は公開しない。
 
 不変の実行ファイル、共有ライブラリ、辞書およびGGUFモデルはNixストアへ置く。動作のために`/usr`以下へファイルまたはリンクを作らない。Swiftコンパイラ、Swift標準ライブラリ、Swift製バイナリを製品のビルドおよび実行時クロージャへ含めない。
+
+## 運用と障害診断
+
+入力状態はFcitx5標準のプリエディットと候補UIで確認する。daemonの起動時エラーは、addonが起動した子processから継承されたstandard errorへ`beankey-daemon:` prefix付きで出力し、llama.cppのmodel/backend診断も同じ出力へ流す。要求単位の不正な入力とprotocol errorはProtobuf responseで接続元addonへ返し、addonはsessionとUIをresetする。
+
+設定GUI、設定用環境変数、daemon専用module、systemd unit、公開status socketまたは独自の診断APIは追加しない。通常状態はFcitx5標準UI、起動・model load障害はFcitx5を起動したsessionのstandard error、永続状態はNixOS moduleが生成した設定とXDG state directoryの学習ファイルを確認境界とする。
 
 ## 検証設計
 
@@ -369,16 +375,13 @@ flowchart TD
 
 Fcitx5実環境では、通常入力、候補UI、確定、複数input context、daemon未起動からの開始、通信切断、timeoutおよびdaemon異常終了を確認する。推論性能は原作準拠プロファイルでcold/warmの応答時間、モデル読込時間およびメモリを記録し、操作停止または無制限な増加がないことを確認する。
 
+受け入れ環境は`x86_64-linux`、NixOS 26.11、Fcitx5 5.1.21、隔離したX11/Xvfb displayおよびGTK 4版Zenityとする。addonによるdaemon直接起動、固定model load、プリエディット、候補選択、確定、daemon `SIGKILL`後の未処理キー返却を確認した。性能と資源の測定値は`spec.md`を正本とする。Waylandおよび他のsystem architectureは未検証の受け入れ環境として暗黙に追加しない。
+
 固定原作との候補列、内部trace、prompt、token、logitおよびprefix再探索の厳密比較は、全機能実装後の適合検証として別に行う。Swift実行環境とgolden vectorはその時点で用意し、現在の正常動作テストを置き換えない。
 
 ## 設計上の未決事項
 
-### 実環境
-
-- 対応するsystem architecture、表示環境および受け入れ確認に使うアプリケーション
-- ログ、状態確認および障害診断の公開方法
-
-未決事項は、固定原作、公式API、技術試作、計測を根拠に決める。現時点の推測を仮実装して既成事実にしない。
+現在の実装に必要な設計上の未決事項はない。受け入れ環境と障害診断境界は、上記の実環境試験と実装済みprocess境界に基づいて確定した。
 
 ## 後続作業
 
