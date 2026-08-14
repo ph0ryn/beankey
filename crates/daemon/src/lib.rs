@@ -18,7 +18,7 @@ pub mod protocol {
 
 pub use config::{
     ConversionConfig, DaemonConfig, DaemonConfigError, InferenceConfig, PredictionConfig,
-    TypoCorrectionConfig,
+    TypoCorrectionConfig, ZenzConfig,
 };
 pub use engine::{ConversionResourceError, Engine, EngineOpenError};
 pub use server::{DaemonServer, ServerError};

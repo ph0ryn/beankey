@@ -384,6 +384,16 @@ impl ConversionSession {
         tables: &InputTableRegistry,
         options: RequestOptions,
     ) -> Result<ConversionResult, DictionaryError> {
+        self.finalize_zenz_request_with_prediction_override(converter, tables, options, None)
+    }
+
+    pub fn finalize_zenz_request_with_prediction_override(
+        &mut self,
+        converter: &NormalConverter<'_>,
+        tables: &InputTableRegistry,
+        options: RequestOptions,
+        prediction_override: Option<Vec<Candidate>>,
+    ) -> Result<ConversionResult, DictionaryError> {
         let mut full = std::mem::take(&mut self.candidates);
         let mut leading_values = full
             .iter()
@@ -394,7 +404,7 @@ impl ConversionSession {
         for (candidate, value) in full.iter_mut().take(5).zip(leading_values) {
             candidate.value = value;
         }
-        self.assemble_request(converter, tables, options, full)
+        self.assemble_request(converter, tables, options, full, prediction_override)
     }
 
     pub fn request_predictions(
@@ -528,7 +538,7 @@ impl ConversionSession {
             &additional,
             options.typo_correction == TypoCorrectionMode::Enabled,
         )?;
-        self.assemble_request(converter, tables, options, full)
+        self.assemble_request(converter, tables, options, full, None)
     }
 
     fn assemble_request(
@@ -537,6 +547,7 @@ impl ConversionSession {
         tables: &InputTableRegistry,
         options: RequestOptions,
         full: Vec<Candidate>,
+        prediction_override: Option<Vec<Candidate>>,
     ) -> Result<ConversionResult, DictionaryError> {
         let additional = self.additional_dictionary();
         let mut first_clauses = unique(
@@ -555,6 +566,8 @@ impl ConversionSession {
         let predictions = if options.japanese_prediction == PredictionMode::Disabled {
             self.stable_prediction_cache = None;
             Vec::new()
+        } else if let Some(predictions) = prediction_override {
+            predictions
         } else {
             self.predictions(converter, tables, 3, &additional)?
         };

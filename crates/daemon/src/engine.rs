@@ -12,7 +12,7 @@ use beankey_converter::{
     InputTableId, InputTableRegistry, KeyboardLanguage, LearningError, LearningMemory,
     LearningMode, NormalConverter, PostCompositionPrediction, PostCompositionPredictor,
     PredictionMode, RequestOptions, SelectionError, TextReplacer, TextReplacerError,
-    TypoCorrectionMode, ZenzLanguageModel, ZenzVersionConfig,
+    TypoCorrectionMode, ZenzLanguageModel, ZenzV3Config, ZenzVersionConfig,
 };
 use beankey_llama::LlamaError;
 use serde::Deserialize;
@@ -63,6 +63,7 @@ pub struct Engine {
     zenz_version: ZenzVersionConfig,
     zenz_rich_candidates: bool,
     zenz_inference_limit: usize,
+    zenz_predictive_input: bool,
     foreign_completion_provider: Option<Arc<dyn ForeignCompletionProvider>>,
     learning_memory: Option<LearningMemory>,
     text_replacer: Option<TextReplacer>,
@@ -201,6 +202,7 @@ impl Engine {
             zenz_version: ZenzVersionConfig::default(),
             zenz_rich_candidates: false,
             zenz_inference_limit: zenz::DEFAULT_INFERENCE_LIMIT,
+            zenz_predictive_input: false,
             foreign_completion_provider: None,
             learning_memory: None,
             text_replacer: None,
@@ -248,6 +250,7 @@ impl Engine {
         engine.load_text_replacer(&config.emoji_dictionary)?;
         engine.load_conversion_resources(&config.conversion)?;
         engine.apply_conversion_options(&config.conversion);
+        engine.apply_zenz_options(&config.zenz);
         Ok(engine)
     }
 
@@ -381,6 +384,20 @@ impl Engine {
             ..default_request_options()
         };
         self.live_conversion = conversion.live_conversion;
+    }
+
+    fn apply_zenz_options(&mut self, config: &crate::config::ZenzConfig) {
+        self.zenz_inference_limit = config.inference_limit;
+        self.zenz_rich_candidates = config.rich_candidates;
+        self.zenz_predictive_input = config.predictive_input;
+        self.zenz_version = ZenzVersionConfig::V3(ZenzV3Config {
+            profile: config.profile.clone(),
+            topic: config.topic.clone(),
+            style: config.style.clone(),
+            preference: config.preference.clone(),
+            enable_alignment_separator: config.enable_alignment_separator,
+            ..ZenzV3Config::default()
+        });
     }
 
     pub fn handle(&mut self, envelope: protocol::Envelope) -> protocol::Envelope {
@@ -948,9 +965,37 @@ impl Engine {
                     format!("Zenz candidate generation failed: {error}"),
                 )
             })?;
+            let prediction_override = if self.zenz_predictive_input
+                && session.request_options.japanese_prediction != PredictionMode::Disabled
+            {
+                Some(
+                    session
+                        .conversion
+                        .request_zenz_prediction(
+                            &converter,
+                            &self.tables,
+                            model,
+                            &version,
+                            session.surrounding.left.as_deref().unwrap_or(""),
+                        )
+                        .map_err(|error| {
+                            (
+                                Code::Internal,
+                                format!("Zenz input prediction failed: {error}"),
+                            )
+                        })?,
+                )
+            } else {
+                None
+            };
             session
                 .conversion
-                .finalize_zenz_request(&converter, &self.tables, session.request_options.clone())
+                .finalize_zenz_request_with_prediction_override(
+                    &converter,
+                    &self.tables,
+                    session.request_options.clone(),
+                    prediction_override,
+                )
                 .map_err(|error| {
                     (
                         Code::Internal,
@@ -1311,6 +1356,39 @@ mod tests {
                 profile: Some("profile".into()),
                 left_context: Some("left".into()),
                 right_context: Some("right".into()),
+                ..Default::default()
+            })
+        );
+    }
+
+    #[test]
+    fn applies_static_zenz_configuration() {
+        let dictionary = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("data/azooKey_dictionary_storage/Dictionary");
+        let mut engine = Engine::open(dictionary).unwrap();
+        engine.apply_zenz_options(&crate::ZenzConfig {
+            inference_limit: 7,
+            rich_candidates: true,
+            predictive_input: true,
+            profile: Some("profile".into()),
+            topic: Some("topic".into()),
+            style: Some("style".into()),
+            preference: Some("preference".into()),
+            enable_alignment_separator: true,
+        });
+
+        assert_eq!(engine.zenz_inference_limit, 7);
+        assert!(engine.zenz_rich_candidates);
+        assert!(engine.zenz_predictive_input);
+        assert_eq!(
+            engine.zenz_version,
+            ZenzVersionConfig::V3(ZenzV3Config {
+                profile: Some("profile".into()),
+                topic: Some("topic".into()),
+                style: Some("style".into()),
+                preference: Some("preference".into()),
+                enable_alignment_separator: true,
                 ..Default::default()
             })
         );

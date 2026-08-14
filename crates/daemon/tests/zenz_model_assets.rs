@@ -102,6 +102,12 @@ typo_correction = "automatic"
 live_conversion = false
 custom_input_tables = {{}}
 
+[zenz]
+inference_limit = 10
+rich_candidates = false
+predictive_input = false
+enable_alignment_separator = false
+
 [inference]
 context_size = 512
 batch_size = 512

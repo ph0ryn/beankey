@@ -2,13 +2,51 @@ use std::path::PathBuf;
 
 use beankey_converter::{
     ConversionSession, DictionaryStore, InputStyle, InputTableRegistry, NormalConverter,
-    PredictionMode, RequestOptions, TypoCorrectionMode,
+    PredictionMode, PrefixConstraint, RequestOptions, TypoCorrectionMode,
 };
 
 fn dictionary_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .join("data/azooKey_dictionary_storage/Dictionary")
+}
+
+#[test]
+fn assembles_a_zenz_predictive_input_override() {
+    let dictionary = DictionaryStore::open(dictionary_root()).unwrap();
+    let converter = NormalConverter::new(&dictionary);
+    let tables = InputTableRegistry::new();
+    let mut prediction_source = ConversionSession::new();
+    prediction_source.insert_str("かな", InputStyle::Direct, &tables);
+    let prediction_override = prediction_source
+        .request_predictions(&converter, &tables, 3)
+        .unwrap();
+    assert!(!prediction_override.is_empty());
+
+    let mut session = ConversionSession::new();
+    session.insert_str("kyo", InputStyle::RomanToKana, &tables);
+    session
+        .request_zenz_draft(&converter, &tables, 2, &PrefixConstraint::default())
+        .unwrap();
+    let result = session
+        .finalize_zenz_request_with_prediction_override(
+            &converter,
+            &tables,
+            RequestOptions {
+                japanese_prediction: PredictionMode::Manual,
+                ..RequestOptions::default()
+            },
+            Some(prediction_override.clone()),
+        )
+        .unwrap();
+
+    assert_eq!(result.prediction_results, prediction_override);
+    assert!(
+        result
+            .main_results
+            .iter()
+            .all(|candidate| !result.prediction_results.contains(candidate))
+    );
 }
 
 #[test]

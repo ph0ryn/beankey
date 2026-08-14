@@ -20,6 +20,7 @@ pub struct DaemonConfig {
     pub runtime_socket: PathBuf,
     pub hunspell: HunspellConfig,
     pub conversion: ConversionConfig,
+    pub zenz: ZenzConfig,
     pub inference: InferenceConfig,
 }
 
@@ -73,6 +74,34 @@ pub enum TypoCorrectionConfig {
     #[default]
     Automatic,
     Disabled,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct ZenzConfig {
+    pub inference_limit: usize,
+    pub rich_candidates: bool,
+    pub predictive_input: bool,
+    pub profile: Option<String>,
+    pub topic: Option<String>,
+    pub style: Option<String>,
+    pub preference: Option<String>,
+    pub enable_alignment_separator: bool,
+}
+
+impl Default for ZenzConfig {
+    fn default() -> Self {
+        Self {
+            inference_limit: 10,
+            rich_candidates: false,
+            predictive_input: false,
+            profile: None,
+            topic: None,
+            style: None,
+            preference: None,
+            enable_alignment_separator: false,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -200,6 +229,12 @@ typo_correction = "automatic"
 live_conversion = false
 custom_input_tables = {}
 
+[zenz]
+inference_limit = 10
+rich_candidates = false
+predictive_input = false
+enable_alignment_separator = false
+
 [inference]
 context_size = 512
 batch_size = 512
@@ -212,6 +247,7 @@ flash_attention = true
         let config = DaemonConfig::parse(CONFIG).unwrap();
         assert_eq!(config.runtime_socket, Path::new("beankey/daemon.sock"));
         assert_eq!(config.inference.context_size, 512);
+        assert_eq!(config.zenz.inference_limit, 10);
     }
 
     #[test]
