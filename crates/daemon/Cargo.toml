@@ -9,6 +9,8 @@ rust-version.workspace = true
 beankey-converter = { path = "../converter" }
 beankey-llama = { path = "../llama" }
 prost.workspace = true
+serde = { version = "1.0.229", features = ["derive"] }
+toml = "1.1.4"
 
 [build-dependencies]
 prost-build = "0.14.1"

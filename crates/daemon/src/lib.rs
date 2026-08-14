@@ -4,6 +4,7 @@ use std::io::{self, Read, Write};
 
 use prost::Message;
 
+mod config;
 mod engine;
 mod zenz;
 
@@ -14,6 +15,7 @@ pub mod protocol {
     include!(concat!(env!("OUT_DIR"), "/beankey.v1.rs"));
 }
 
+pub use config::{DaemonConfig, DaemonConfigError, InferenceConfig};
 pub use engine::{Engine, EngineOpenError};
 pub use zenz::{DEFAULT_INFERENCE_LIMIT, LlamaModel, ZenzConversionError};
 
