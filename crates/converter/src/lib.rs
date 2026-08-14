@@ -16,7 +16,7 @@ pub use input::{
     FormatSide, InputElement, InputModifier, InputPiece, InputStyle, InputTable,
     InputTableExportError, InputTableId, InputTableRegistry, KeyElement, ValueElement,
 };
-pub use lattice::{Candidate, ConversionContext, LatticeRange, NormalConverter};
+pub use lattice::{Candidate, CompleteAction, ConversionContext, LatticeRange, NormalConverter};
 pub use learning::{LearningError, LearningMemory, LearningMode};
 pub use post_prediction::{
     PostCompositionPrediction, PostCompositionPredictor, PostPredictionKind,
