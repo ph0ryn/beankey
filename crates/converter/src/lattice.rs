@@ -200,6 +200,7 @@ pub struct Candidate {
     pub last_meaning_id: u16,
     pub entries: Vec<DictionaryEntry>,
     pub ruby_count: usize,
+    pub is_learning_target: bool,
     first_clause: Option<FirstClause>,
 }
 
@@ -227,6 +228,7 @@ impl Candidate {
             last_meaning_id: u16::try_from(first.meaning_id).unwrap_or(u16::MAX),
             entries,
             ruby_count,
+            is_learning_target: self.is_learning_target,
             first_clause: None,
         })
     }
@@ -259,8 +261,14 @@ impl Candidate {
             last_meaning_id,
             entries,
             ruby_count,
+            is_learning_target: true,
             first_clause: None,
         }
+    }
+
+    pub(crate) fn with_learning_target(mut self, value: bool) -> Self {
+        self.is_learning_target = value;
+        self
     }
 }
 
@@ -789,6 +797,7 @@ impl<'a> NormalConverter<'a> {
             last_meaning_id: u16::try_from(previous_meaning).unwrap_or(u16::MAX),
             entries,
             ruby_count,
+            is_learning_target: true,
             first_clause,
         }
     }

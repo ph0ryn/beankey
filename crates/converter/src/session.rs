@@ -15,12 +15,13 @@ pub enum PredictionMode {
     Disabled,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RequestOptions {
     pub n_best: usize,
     pub japanese_prediction: PredictionMode,
     pub full_width_roman: bool,
     pub half_width_kana: bool,
+    pub version_string: Option<String>,
 }
 
 impl Default for RequestOptions {
@@ -30,6 +31,7 @@ impl Default for RequestOptions {
             japanese_prediction: PredictionMode::Automatic,
             full_width_roman: false,
             half_width_kana: false,
+            version_string: None,
         }
     }
 }
@@ -315,6 +317,7 @@ impl ConversionSession {
                         entry.meaning_id,
                         vec![entry],
                     )
+                    .with_learning_target(false)
                 }),
         );
         leading = unique(leading);
@@ -348,6 +351,10 @@ impl ConversionSession {
                 .then_with(|| right.value.total_cmp(&left.value))
         });
         words.retain(|candidate| seen.insert(candidate.text.clone()));
+        let mut special =
+            crate::special_candidates(&self.composing, options.version_string.as_deref());
+        special.retain(|candidate| seen.insert(candidate.text.clone()));
+        words.splice(5.min(words.len())..5.min(words.len()), special);
 
         let mut main_results = leading;
         main_results.extend(first_for_main);
@@ -383,7 +390,9 @@ impl ConversionSession {
             };
         }
         self.candidates.clear();
-        if let Some(memory) = self.learning_memory.clone() {
+        if candidate.is_learning_target
+            && let Some(memory) = self.learning_memory.clone()
+        {
             memory.learn(&candidate)?;
             self.learned_dictionary = memory.entries()?;
         }

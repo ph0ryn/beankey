@@ -4,6 +4,7 @@ mod lattice;
 mod learning;
 mod post_prediction;
 mod session;
+mod special;
 
 pub use dictionary::{
     CharacterIdMap, DictionaryBinaryError, DictionaryEntry, DictionaryError, DictionaryMatch,
@@ -23,3 +24,4 @@ pub use post_prediction::{
 pub use session::{
     ConversionResult, ConversionSession, PredictionMode, RequestOptions, SelectionError,
 };
+pub use special::special_candidates;
