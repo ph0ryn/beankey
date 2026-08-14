@@ -10,7 +10,7 @@ const EXPECTED_CONTEXT_SIZE: usize = 512;
 const EXPECTED_BATCH_SIZE: usize = 512;
 const EXPECTED_MICRO_BATCH_SIZE: usize = 64;
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct DaemonConfig {
     pub dictionary: PathBuf,
@@ -76,7 +76,7 @@ pub enum TypoCorrectionConfig {
     Disabled,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct ZenzConfig {
     pub inference_limit: usize,
@@ -87,6 +87,7 @@ pub struct ZenzConfig {
     pub style: Option<String>,
     pub preference: Option<String>,
     pub enable_alignment_separator: bool,
+    pub personalization: Option<PersonalizationConfig>,
 }
 
 impl Default for ZenzConfig {
@@ -100,8 +101,17 @@ impl Default for ZenzConfig {
             style: None,
             preference: None,
             enable_alignment_separator: false,
+            personalization: None,
         }
     }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct PersonalizationConfig {
+    pub base_ngram: PathBuf,
+    pub personal_ngram: PathBuf,
+    pub alpha: f32,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -126,6 +136,7 @@ pub enum DaemonConfigError {
     Parse(toml::de::Error),
     InvalidRuntimeSocket,
     InvalidConversionCandidateCount,
+    InvalidPersonalizationAlpha,
     UnsupportedInferenceProfile(InferenceConfig),
 }
 
@@ -139,6 +150,12 @@ impl fmt::Display for DaemonConfigError {
             }
             Self::InvalidConversionCandidateCount => {
                 write!(formatter, "conversion.n_best must be greater than zero")
+            }
+            Self::InvalidPersonalizationAlpha => {
+                write!(
+                    formatter,
+                    "zenz.personalization.alpha must be finite and nonnegative"
+                )
             }
             Self::UnsupportedInferenceProfile(profile) => write!(
                 formatter,
@@ -159,6 +176,7 @@ impl Error for DaemonConfigError {
             Self::Parse(error) => Some(error),
             Self::InvalidRuntimeSocket
             | Self::InvalidConversionCandidateCount
+            | Self::InvalidPersonalizationAlpha
             | Self::UnsupportedInferenceProfile(_) => None,
         }
     }
@@ -198,6 +216,14 @@ impl DaemonConfig {
         }
         if self.conversion.n_best == 0 {
             return Err(DaemonConfigError::InvalidConversionCandidateCount);
+        }
+        if self
+            .zenz
+            .personalization
+            .as_ref()
+            .is_some_and(|config| !config.alpha.is_finite() || config.alpha < 0.0)
+        {
+            return Err(DaemonConfigError::InvalidPersonalizationAlpha);
         }
         Ok(())
     }
@@ -283,6 +309,17 @@ flash_attention = true
         assert!(matches!(
             DaemonConfig::parse(&config),
             Err(DaemonConfigError::InvalidConversionCandidateCount)
+        ));
+    }
+
+    #[test]
+    fn rejects_an_invalid_personalization_strength() {
+        let config = format!(
+            "{CONFIG}\n[zenz.personalization]\nbase_ngram = \"/base\"\npersonal_ngram = \"/personal\"\nalpha = -1.0\n"
+        );
+        assert!(matches!(
+            DaemonConfig::parse(&config),
+            Err(DaemonConfigError::InvalidPersonalizationAlpha)
         ));
     }
 }

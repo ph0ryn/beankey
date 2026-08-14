@@ -4,12 +4,50 @@ use std::path::Path;
 
 use beankey_converter::{
     Candidate, CandidateEvaluation, ConversionSession, DictionaryError, DictionaryMetadata,
-    InputTableRegistry, NormalConverter, PrefixConstraint, ZenzEvaluationRequest,
-    ZenzInferenceError, ZenzLanguageModel, ZenzVersionConfig, evaluate_candidate,
+    EfficientNGram, InputTableRegistry, NGramError, NormalConverter, PrefixConstraint,
+    ZenzEvaluationRequest, ZenzInferenceError, ZenzLanguageModel, ZenzPersonalization,
+    ZenzVersionConfig, evaluate_candidate,
 };
 use beankey_llama::{LlamaContext, LlamaError};
 
 pub const DEFAULT_INFERENCE_LIMIT: usize = 10;
+const PERSONALIZATION_N: usize = 5;
+const PERSONALIZATION_DISCOUNT: f64 = 0.75;
+
+pub(crate) struct ZenzPersonalizationModels {
+    alpha: f32,
+    base: EfficientNGram,
+    personal: EfficientNGram,
+}
+
+pub(crate) struct ZenzConversionOptions<'a> {
+    pub(crate) version: &'a ZenzVersionConfig,
+    pub(crate) request_rich_candidates: bool,
+    pub(crate) inference_limit: usize,
+    pub(crate) personalization: Option<&'a ZenzPersonalizationModels>,
+}
+
+impl ZenzPersonalizationModels {
+    pub(crate) fn load(
+        base: impl AsRef<Path>,
+        personal: impl AsRef<Path>,
+        alpha: f32,
+    ) -> Result<Self, NGramError> {
+        Ok(Self {
+            alpha,
+            base: EfficientNGram::open(base, PERSONALIZATION_N, PERSONALIZATION_DISCOUNT)?,
+            personal: EfficientNGram::open(personal, PERSONALIZATION_N, PERSONALIZATION_DISCOUNT)?,
+        })
+    }
+
+    fn request(&self) -> ZenzPersonalization<'_> {
+        ZenzPersonalization {
+            alpha: self.alpha,
+            base: &self.base,
+            personal: &self.personal,
+        }
+    }
+}
 
 pub struct LlamaModel {
     context: LlamaContext,
@@ -95,22 +133,20 @@ pub fn convert(
     converter: &NormalConverter<'_>,
     tables: &InputTableRegistry,
     model: &mut dyn ZenzLanguageModel,
-    version: &ZenzVersionConfig,
-    request_rich_candidates: bool,
-    inference_limit: usize,
+    options: ZenzConversionOptions<'_>,
 ) -> Result<(), ZenzConversionError> {
     let input = to_katakana(&session.composing().surface());
     let input_cursor_position = Some(session.composing().cursor());
     let mut constraint = PrefixConstraint::default();
 
-    for inference in 0..=inference_limit {
+    for inference in 0..=options.inference_limit {
         let draft = session
             .request_zenz_draft(
                 converter,
                 tables,
                 if constraint.is_empty() {
                     2
-                } else if request_rich_candidates {
+                } else if options.request_rich_candidates {
                     3
                 } else {
                     1
@@ -122,7 +158,7 @@ pub fn convert(
             session.set_zenz_candidates(draft);
             return Ok(());
         };
-        if inference == inference_limit {
+        if inference == options.inference_limit {
             session.set_zenz_candidates(draft);
             return Ok(());
         }
@@ -133,10 +169,12 @@ pub fn convert(
                 input: &input,
                 input_cursor_position,
                 candidate,
-                request_rich_candidates,
+                request_rich_candidates: options.request_rich_candidates,
                 prefix_constraint: &constraint,
-                personalization: None,
-                version,
+                personalization: options
+                    .personalization
+                    .map(ZenzPersonalizationModels::request),
+                version: options.version,
             },
         )?;
         match evaluation {
@@ -255,7 +293,7 @@ mod tests {
         ZenzInferenceError, ZenzLanguageModel, ZenzV3Config, ZenzVersionConfig,
     };
 
-    use super::convert;
+    use super::{ZenzConversionOptions, convert};
 
     struct PrefixModel {
         evaluations: usize,
@@ -328,9 +366,12 @@ mod tests {
             &converter,
             &tables,
             &mut model,
-            &ZenzVersionConfig::default(),
-            false,
-            10,
+            ZenzConversionOptions {
+                version: &ZenzVersionConfig::default(),
+                request_rich_candidates: false,
+                inference_limit: 10,
+                personalization: None,
+            },
         )
         .unwrap();
 
@@ -352,9 +393,12 @@ mod tests {
             &converter,
             &tables,
             &mut model,
-            &ZenzVersionConfig::default(),
-            false,
-            0,
+            ZenzConversionOptions {
+                version: &ZenzVersionConfig::default(),
+                request_rich_candidates: false,
+                inference_limit: 0,
+                personalization: None,
+            },
         )
         .unwrap();
 
@@ -377,12 +421,15 @@ mod tests {
             &converter,
             &tables,
             &mut model,
-            &ZenzVersionConfig::V3(ZenzV3Config {
-                enable_alignment_separator: true,
-                ..Default::default()
-            }),
-            false,
-            1,
+            ZenzConversionOptions {
+                version: &ZenzVersionConfig::V3(ZenzV3Config {
+                    enable_alignment_separator: true,
+                    ..Default::default()
+                }),
+                request_rich_candidates: false,
+                inference_limit: 1,
+                personalization: None,
+            },
         )
         .unwrap();
 

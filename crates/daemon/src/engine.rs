@@ -10,7 +10,7 @@ use beankey_converter::{
     DictionaryError, DictionaryMetadata, DictionaryStore, ForeignCompletionProvider, FormatReport,
     HunspellCompleter, HunspellError, InputModifier, InputStyle as ConverterInputStyle, InputTable,
     InputTableId, InputTableRegistry, KeyboardLanguage, LearningError, LearningMemory,
-    LearningMode, NormalConverter, PostCompositionPrediction, PostCompositionPredictor,
+    LearningMode, NGramError, NormalConverter, PostCompositionPrediction, PostCompositionPredictor,
     PredictionMode, RequestOptions, SelectionError, TextReplacer, TextReplacerError,
     TypoCorrectionMode, ZenzLanguageModel, ZenzV3Config, ZenzVersionConfig,
 };
@@ -64,6 +64,7 @@ pub struct Engine {
     zenz_rich_candidates: bool,
     zenz_inference_limit: usize,
     zenz_predictive_input: bool,
+    zenz_personalization: Option<zenz::ZenzPersonalizationModels>,
     foreign_completion_provider: Option<Arc<dyn ForeignCompletionProvider>>,
     learning_memory: Option<LearningMemory>,
     text_replacer: Option<TextReplacer>,
@@ -81,6 +82,7 @@ pub enum EngineOpenError {
     Learning(LearningError),
     TextReplacer(TextReplacerError),
     ConversionResource(ConversionResourceError),
+    NGram(NGramError),
 }
 
 impl fmt::Display for EngineOpenError {
@@ -92,6 +94,7 @@ impl fmt::Display for EngineOpenError {
             Self::Learning(error) => error.fmt(formatter),
             Self::TextReplacer(error) => error.fmt(formatter),
             Self::ConversionResource(error) => error.fmt(formatter),
+            Self::NGram(error) => error.fmt(formatter),
         }
     }
 }
@@ -105,6 +108,7 @@ impl Error for EngineOpenError {
             Self::Learning(error) => Some(error),
             Self::TextReplacer(error) => Some(error),
             Self::ConversionResource(error) => Some(error),
+            Self::NGram(error) => Some(error),
         }
     }
 }
@@ -142,6 +146,12 @@ impl From<TextReplacerError> for EngineOpenError {
 impl From<ConversionResourceError> for EngineOpenError {
     fn from(value: ConversionResourceError) -> Self {
         Self::ConversionResource(value)
+    }
+}
+
+impl From<NGramError> for EngineOpenError {
+    fn from(value: NGramError) -> Self {
+        Self::NGram(value)
     }
 }
 
@@ -203,6 +213,7 @@ impl Engine {
             zenz_rich_candidates: false,
             zenz_inference_limit: zenz::DEFAULT_INFERENCE_LIMIT,
             zenz_predictive_input: false,
+            zenz_personalization: None,
             foreign_completion_provider: None,
             learning_memory: None,
             text_replacer: None,
@@ -251,6 +262,7 @@ impl Engine {
         engine.load_conversion_resources(&config.conversion)?;
         engine.apply_conversion_options(&config.conversion);
         engine.apply_zenz_options(&config.zenz);
+        engine.load_zenz_personalization(&config.zenz)?;
         Ok(engine)
     }
 
@@ -398,6 +410,24 @@ impl Engine {
             enable_alignment_separator: config.enable_alignment_separator,
             ..ZenzV3Config::default()
         });
+    }
+
+    fn load_zenz_personalization(
+        &mut self,
+        config: &crate::config::ZenzConfig,
+    ) -> Result<(), NGramError> {
+        self.zenz_personalization = config
+            .personalization
+            .as_ref()
+            .map(|personalization| {
+                zenz::ZenzPersonalizationModels::load(
+                    &personalization.base_ngram,
+                    &personalization.personal_ngram,
+                    personalization.alpha,
+                )
+            })
+            .transpose()?;
+        Ok(())
     }
 
     pub fn handle(&mut self, envelope: protocol::Envelope) -> protocol::Envelope {
@@ -955,9 +985,12 @@ impl Engine {
                 &converter,
                 &self.tables,
                 model,
-                &version,
-                self.zenz_rich_candidates,
-                self.zenz_inference_limit,
+                zenz::ZenzConversionOptions {
+                    version: &version,
+                    request_rich_candidates: self.zenz_rich_candidates,
+                    inference_limit: self.zenz_inference_limit,
+                    personalization: self.zenz_personalization.as_ref(),
+                },
             )
             .map_err(|error| {
                 (
@@ -1376,6 +1409,7 @@ mod tests {
             style: Some("style".into()),
             preference: Some("preference".into()),
             enable_alignment_separator: true,
+            personalization: None,
         });
 
         assert_eq!(engine.zenz_inference_limit, 7);
@@ -1392,5 +1426,26 @@ mod tests {
                 ..Default::default()
             })
         );
+    }
+
+    #[test]
+    fn loads_fixed_format_personalization_models() {
+        let dictionary = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("data/azooKey_dictionary_storage/Dictionary");
+        let ngram = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../converter/tests/data/ngram");
+        let mut engine = Engine::open(dictionary).unwrap();
+        let config = crate::ZenzConfig {
+            personalization: Some(crate::PersonalizationConfig {
+                base_ngram: ngram.join("lm"),
+                personal_ngram: ngram.join("personal"),
+                alpha: 0.5,
+            }),
+            ..Default::default()
+        };
+
+        engine.load_zenz_personalization(&config).unwrap();
+
+        assert!(engine.zenz_personalization.is_some());
     }
 }
