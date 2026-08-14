@@ -194,7 +194,9 @@ rich candidate、personalization、次入力予測、LM誤入力訂正も最終�
 - KV cacheの削除、複製、最大位置取得
 - CPU専用または原作準拠backendの構成
 
-原作スナップショットは、性能とメモリの回帰を理由にAzooKey forkのllama.cpp `b4846`へ固定している。一方、本プロジェクトはXCFrameworkを再包装せず、`flake.lock`が固定するnixpkgsの`pkgs.llama-cpp`を通常のshared library依存として利用する。`crates/llama`はこのpackageが提供するC APIの必要部分だけをbindingし、llama.cppのsourceをvendor、再包装、静的linkまたは独自ビルドしない。原作と異なるAPI名やKV memory操作をcrate外へ露出させない。backendおよび原作との挙動差は技術試作で確定する。
+原作スナップショットは、性能とメモリの回帰を理由にAzooKey forkのllama.cpp `b4846`へ固定している。一方、本プロジェクトはXCFrameworkを再包装せず、`flake.lock`が固定するnixpkgsの`pkgs.llama-cpp`を通常のshared library依存として利用する。`crates/llama`はこのpackageが提供するC APIの必要部分だけをbindingし、llama.cppのsourceをvendor、再包装、静的linkまたは独自ビルドしない。原作と異なるAPI名やKV memory操作をcrate外へ露出させない。nixpkgs packageが`bin`へ分離して配置するdynamic backendは、NixOS moduleが生成した内部pathから明示的に読み込む。
+
+固定GGUFの`gpt2-small-japanese-char` pre-tokenizer名は原作forkだけの追加であり、固定`pkgs.llama-cpp`では認識されない。両実装のpre-tokenization regexが`gpt-2`と同一であることを固定ソースで確認したため、FFI境界はmodel load時にこのmetadataだけを`gpt-2`へoverrideする。model file自体は変更しない。
 
 推論は原作準拠のプロファイルとして、context 512 token、batch 512、microbatch 64、flash attention有効を使用する。thread数はNixOS上で利用可能なprocessor数に合わせる。利用する`pkgs.llama-cpp`がacceleratorを提供する場合は原作の通常Zenzai相当、提供しない場合は原作のZenzaiCPU相当として構成する。
 
@@ -274,7 +276,7 @@ daemonへの接続または要求が失敗した場合は、対応するセッ�
 - 辞書とモデルのパスをデーモンへ渡せるようにする
 - 各ソースとデータのリビジョン、ハッシュ、ライセンス境界を保つ
 
-NixOS moduleは`programs.beankey`から内部用TOMLを生成し、`/etc/beankey/config.toml`からNix store上の生成物を参照させる。TOMLには辞書とモデルのNix store path、推論プロファイルおよび`runtime_socket = "beankey/daemon.sock"`を記録する。この相対pathはdaemonとaddonの双方が`$XDG_RUNTIME_DIR`を基準に解決する。addonは埋め込まれたdaemon executableを`--config /etc/beankey/config.toml`付きで起動する。利用者がこのTOMLを直接編集する経路は提供しない。
+NixOS moduleは`programs.beankey`から内部用TOMLを生成し、`/etc/beankey/config.toml`からNix store上の生成物を参照させる。TOMLには辞書、モデルおよびllama.cpp dynamic backend directoryのNix store path、推論プロファイルならびに`runtime_socket = "beankey/daemon.sock"`を記録する。この相対pathはdaemonとaddonの双方が`$XDG_RUNTIME_DIR`を基準に解決する。addonは埋め込まれたdaemon executableを`--config /etc/beankey/config.toml`付きで起動する。利用者がこのTOMLを直接編集する経路は提供しない。
 
 ## 状態と共有
 

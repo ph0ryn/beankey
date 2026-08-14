@@ -363,6 +363,8 @@ Darwinでは、AzooKey forkのRelease `b4846` にあるsigned XCFrameworkをchec
 
 model loadはmmapを有効にする。`ZenzaiCPU` ではGPU layerを0、split modeをnone、device listをCPUだけにし、contextのKQV offloadも無効化する（`ZenzContext.swift:273-303`, `ZenzContext.swift:433-446`）。contextは512 token、batch 512、microbatch 64、flash attention有効である（`ZenzContext.swift:342-378`）。
 
+固定GGUFは`tokenizer.ggml.pre = gpt2-small-japanese-char`を持つ。原作が固定するazooKey/llama.cpp `b4846`では、この値を専用enumへ対応付けるが、実際のpre-tokenization regexは`gpt-2`と同じである（`src/llama-vocab.cpp:341-348,1617-1618`）。固定nixpkgsのllama.cpp `10273`は専用名を受理しない一方、`gpt-2`を同じregexへ対応付けるため、製品はmodel load時の`llama_model_kv_override`で`tokenizer.ggml.pre`だけを`gpt-2`へ読み替える。GGUF本体は変更しない。
+
 evaluationとinput predictionに別sequence IDを使い、完全token prefixがより長い場合はKVをsequence間copyし、分岐後をremoveしてdecodeする（`ZenzContext.swift:465-518`）。候補評価、次入力生成、greedy decode、Zenz-based typo correctionがこのlogit取得経路に依存する（`Zenz.swift:67-157`）。
 
 ### 推論
