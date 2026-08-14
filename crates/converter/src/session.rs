@@ -3,8 +3,8 @@ use std::fmt;
 
 use crate::{
     Candidate, ComposingText, ConversionContext, DictionaryEntry, DictionaryError,
-    DictionaryMetadata, InputStyle, InputTableRegistry, NormalConverter, PostCompositionPrediction,
-    PostCompositionPredictor,
+    DictionaryMetadata, InputStyle, InputTableRegistry, LearningError, LearningMemory,
+    NormalConverter, PostCompositionPrediction, PostCompositionPredictor,
 };
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -42,13 +42,35 @@ pub struct ConversionResult {
     pub first_clause_results: Vec<Candidate>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug)]
 pub enum SelectionError {
     CandidateOutOfRange {
         index: usize,
         candidate_count: usize,
     },
+    Learning(LearningError),
 }
+
+impl PartialEq for SelectionError {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                Self::CandidateOutOfRange {
+                    index: left_index,
+                    candidate_count: left_count,
+                },
+                Self::CandidateOutOfRange {
+                    index: right_index,
+                    candidate_count: right_count,
+                },
+            ) => left_index == right_index && left_count == right_count,
+            (Self::Learning(left), Self::Learning(right)) => left.to_string() == right.to_string(),
+            _ => false,
+        }
+    }
+}
+
+impl Eq for SelectionError {}
 
 impl fmt::Display for SelectionError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -60,13 +82,20 @@ impl fmt::Display for SelectionError {
                 formatter,
                 "candidate index {index} is outside the current {candidate_count} candidates"
             ),
+            Self::Learning(error) => error.fmt(formatter),
         }
     }
 }
 
 impl Error for SelectionError {}
 
-#[derive(Clone, Debug, Default)]
+impl From<LearningError> for SelectionError {
+    fn from(value: LearningError) -> Self {
+        Self::Learning(value)
+    }
+}
+
+#[derive(Clone, Default)]
 pub struct ConversionSession {
     composing: ComposingText,
     candidates: Vec<Candidate>,
@@ -74,6 +103,8 @@ pub struct ConversionSession {
     last_committed: Option<Candidate>,
     user_dictionary: Vec<DictionaryEntry>,
     user_shortcuts: Vec<DictionaryEntry>,
+    learning_memory: Option<LearningMemory>,
+    learned_dictionary: Vec<DictionaryEntry>,
 }
 
 impl ConversionSession {
@@ -100,6 +131,53 @@ impl ConversionSession {
         self.user_dictionary = entries;
         self.user_shortcuts = shortcuts;
         self.candidates.clear();
+    }
+
+    pub fn set_learning_memory(&mut self, memory: LearningMemory) -> Result<(), LearningError> {
+        self.learned_dictionary = memory.entries()?;
+        self.learning_memory = Some(memory);
+        self.candidates.clear();
+        Ok(())
+    }
+
+    pub fn refresh_learning(&mut self) -> Result<(), LearningError> {
+        self.learned_dictionary = match &self.learning_memory {
+            Some(memory) => memory.entries()?,
+            None => Vec::new(),
+        };
+        self.candidates.clear();
+        Ok(())
+    }
+
+    pub fn commit_learning(&mut self) -> Result<bool, LearningError> {
+        let committed = match &self.learning_memory {
+            Some(memory) => memory.commit()?,
+            None => false,
+        };
+        self.refresh_learning()?;
+        Ok(committed)
+    }
+
+    pub fn forget_learning(&mut self, candidate: &Candidate) -> Result<(), LearningError> {
+        if let Some(memory) = &self.learning_memory {
+            memory.forget(candidate)?;
+        }
+        self.refresh_learning()
+    }
+
+    pub fn reset_learning(&mut self) -> Result<(), LearningError> {
+        if let Some(memory) = &self.learning_memory {
+            memory.reset()?;
+        }
+        self.refresh_learning()
+    }
+
+    fn additional_dictionary(&self) -> Vec<DictionaryEntry> {
+        self.user_dictionary
+            .iter()
+            .chain(&self.learned_dictionary)
+            .cloned()
+            .collect()
     }
 
     pub fn insert_str(
@@ -144,12 +222,13 @@ impl ConversionSession {
         tables: &InputTableRegistry,
         n_best: usize,
     ) -> Result<&[Candidate], DictionaryError> {
+        let additional = self.additional_dictionary();
         self.candidates = converter.convert_with_entries(
             &self.composing,
             tables,
             n_best,
             self.context,
-            &self.user_dictionary,
+            &additional,
         )?;
         let mut seen: std::collections::HashSet<_> = self
             .candidates
@@ -179,13 +258,8 @@ impl ConversionSession {
         tables: &InputTableRegistry,
         n_best: usize,
     ) -> Result<Vec<Candidate>, DictionaryError> {
-        converter.predict_with_entries(
-            &self.composing,
-            tables,
-            n_best,
-            self.context,
-            &self.user_dictionary,
-        )
+        let additional = self.additional_dictionary();
+        converter.predict_with_entries(&self.composing, tables, n_best, self.context, &additional)
     }
 
     pub fn request(
@@ -194,12 +268,13 @@ impl ConversionSession {
         tables: &InputTableRegistry,
         options: RequestOptions,
     ) -> Result<ConversionResult, DictionaryError> {
+        let additional = self.additional_dictionary();
         let full = converter.convert_with_entries(
             &self.composing,
             tables,
             options.n_best,
             self.context,
-            &self.user_dictionary,
+            &additional,
         )?;
         let mut first_clauses = unique(
             full.iter()
@@ -217,13 +292,7 @@ impl ConversionSession {
         let predictions = if options.japanese_prediction == PredictionMode::Disabled {
             Vec::new()
         } else {
-            converter.predict_with_entries(
-                &self.composing,
-                tables,
-                3,
-                self.context,
-                &self.user_dictionary,
-            )?
+            converter.predict_with_entries(&self.composing, tables, 3, self.context, &additional)?
         };
         let mut leading: Vec<_> = full.iter().take(5).cloned().collect();
         let katakana = to_katakana(&self.composing.surface());
@@ -314,6 +383,10 @@ impl ConversionSession {
             };
         }
         self.candidates.clear();
+        if let Some(memory) = self.learning_memory.clone() {
+            memory.learn(&candidate)?;
+            self.learned_dictionary = memory.entries()?;
+        }
         self.last_committed = Some(candidate.clone());
         if self.composing.is_empty() {
             self.composing.stop();

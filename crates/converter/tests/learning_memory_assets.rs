@@ -1,0 +1,77 @@
+use std::path::PathBuf;
+use std::{fs, process};
+
+use beankey_converter::{
+    ConversionSession, DictionaryMetadata, DictionaryStore, InputStyle, InputTableRegistry,
+    LearningMemory, LearningMode, NormalConverter,
+};
+
+fn dictionary_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("data/azooKey_dictionary_storage/Dictionary")
+}
+
+fn temporary_directory() -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "beankey-learning-{}-{}",
+        process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ))
+}
+
+#[test]
+fn learns_persists_recovers_forgets_and_resets_selected_candidates() {
+    let directory = temporary_directory();
+    let dictionary = DictionaryStore::open(dictionary_root()).unwrap();
+    let converter = NormalConverter::new(&dictionary);
+    let tables = InputTableRegistry::new();
+    let memory = LearningMemory::open(&directory, LearningMode::InputAndOutput, 128).unwrap();
+    let mut session = ConversionSession::new();
+    session.set_learning_memory(memory.clone()).unwrap();
+    session.insert_str("しかい", InputStyle::Direct, &tables);
+    let candidates = session.request_candidates(&converter, &tables, 10).unwrap();
+    let index = candidates
+        .iter()
+        .position(|candidate| candidate.text == "司会" && candidate.entries.len() == 1)
+        .unwrap();
+    let selected = candidates[index].clone();
+    session.select_candidate(index, &tables).unwrap();
+    assert!(session.commit_learning().unwrap());
+
+    fs::remove_file(directory.join("memory.bin")).unwrap();
+    fs::write(directory.join(".pause"), []).unwrap();
+    let recovered = LearningMemory::open(&directory, LearningMode::OnlyOutput, 128).unwrap();
+    let mut next_session = ConversionSession::new();
+    next_session.set_learning_memory(recovered).unwrap();
+    next_session.insert_str("しかい", InputStyle::Direct, &tables);
+    let learned = next_session
+        .request_candidates(&converter, &tables, 10)
+        .unwrap()
+        .iter()
+        .find(|candidate| candidate.text == "司会")
+        .unwrap();
+    assert!(
+        learned
+            .entries
+            .iter()
+            .any(|entry| entry.metadata.contains(DictionaryMetadata::LEARNED))
+    );
+
+    next_session.set_learning_memory(memory.clone()).unwrap();
+    next_session.forget_learning(&selected).unwrap();
+    assert!(
+        !memory
+            .entries()
+            .unwrap()
+            .iter()
+            .any(|entry| entry.word == "司会")
+    );
+    next_session.reset_learning().unwrap();
+    assert!(memory.entries().unwrap().is_empty());
+
+    fs::remove_dir_all(directory).unwrap();
+}

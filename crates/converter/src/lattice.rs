@@ -878,7 +878,7 @@ fn word_type(class_id: usize) -> u8 {
     2
 }
 
-fn is_clause(former: usize, latter: usize) -> bool {
+pub(crate) fn is_clause(former: usize, latter: usize) -> bool {
     let latter_type = word_type(latter);
     if latter_type == 3 {
         return false;

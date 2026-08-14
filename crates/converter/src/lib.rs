@@ -1,6 +1,7 @@
 mod dictionary;
 mod input;
 mod lattice;
+mod learning;
 mod post_prediction;
 mod session;
 
@@ -15,6 +16,7 @@ pub use input::{
     InputTableExportError, InputTableId, InputTableRegistry, KeyElement, ValueElement,
 };
 pub use lattice::{Candidate, ConversionContext, LatticeRange, NormalConverter};
+pub use learning::{LearningError, LearningMemory, LearningMode};
 pub use post_prediction::{
     PostCompositionPrediction, PostCompositionPredictor, PostPredictionKind,
 };
