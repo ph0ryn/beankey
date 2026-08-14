@@ -359,6 +359,9 @@ impl ConversionSession {
         let mut main_results = leading;
         main_results.extend(first_for_main);
         main_results.extend(words);
+        let main_results = finalize_candidates(main_results);
+        let predictions = finalize_candidates(predictions);
+        let first_clauses = finalize_candidates(first_clauses);
         self.candidates = main_results.clone();
         Ok(ConversionResult {
             main_results,
@@ -420,6 +423,13 @@ impl ConversionSession {
         self.context = ConversionContext::default();
         self.last_committed = None;
     }
+}
+
+fn finalize_candidates(candidates: Vec<Candidate>) -> Vec<Candidate> {
+    candidates
+        .into_iter()
+        .map(Candidate::expand_templates)
+        .collect()
 }
 
 fn to_katakana(value: &str) -> String {

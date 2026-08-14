@@ -78,3 +78,35 @@ fn uses_dynamic_entries_for_conversion_prediction_and_shortcuts() {
             .any(|candidate| candidate.text == "openai.com")
     );
 }
+
+#[test]
+fn expands_dynamic_dictionary_templates_before_exposing_candidates() {
+    let dictionary = DictionaryStore::open(dictionary_root()).unwrap();
+    let converter = NormalConverter::new(&dictionary);
+    let tables = InputTableRegistry::new();
+    let mut session = ConversionSession::new();
+    session.import_dynamic_user_dictionary(
+        vec![user_entry(
+            "<random type=\"int\" value=\"7,7\">",
+            "テンプレート",
+        )],
+        Vec::new(),
+    );
+
+    session.insert_str("てんぷれーと", InputStyle::Direct, &tables);
+    let result = session
+        .request(&converter, &tables, RequestOptions::default())
+        .unwrap();
+    let candidate = result
+        .main_results
+        .iter()
+        .find(|candidate| candidate.text == "7")
+        .expect("expanded template candidate");
+    assert!(!candidate.is_learning_target);
+    assert!(
+        !result
+            .main_results
+            .iter()
+            .any(|candidate| candidate.text.starts_with("<random"))
+    );
+}

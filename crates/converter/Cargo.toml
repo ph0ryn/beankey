@@ -6,4 +6,10 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+chrono.workspace = true
+icu_calendar.workspace = true
+icu_datetime.workspace = true
+icu_locale.workspace = true
+rand.workspace = true
 unicode-segmentation.workspace = true
+writeable.workspace = true

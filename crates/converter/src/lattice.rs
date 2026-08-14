@@ -279,6 +279,16 @@ impl Candidate {
         self.is_learning_target = value;
         self
     }
+
+    pub(crate) fn expand_templates(mut self) -> Self {
+        let expanded = crate::expand_templates(&self.text);
+        if expanded != self.text {
+            self.text = expanded;
+            self.is_learning_target = false;
+            self.actions = appropriate_actions(&self.text);
+        }
+        self
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
