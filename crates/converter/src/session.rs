@@ -1,8 +1,10 @@
 use std::error::Error;
 use std::fmt;
+use std::sync::Arc;
 
 use unicode_segmentation::UnicodeSegmentation;
 
+use crate::foreign::{ForeignCompletionProvider, foreign_predictions};
 use crate::{
     Candidate, ComposingCount, ComposingText, ConversionContext, DictionaryEntry, DictionaryError,
     DictionaryMetadata, InputStyle, InputTableRegistry, LearningError, LearningMemory,
@@ -33,6 +35,8 @@ pub struct RequestOptions {
     pub half_width_kana: bool,
     pub version_string: Option<String>,
     pub typo_correction: TypoCorrectionMode,
+    pub foreign_prediction: PredictionMode,
+    pub keyboard_language: crate::KeyboardLanguage,
 }
 
 impl Default for RequestOptions {
@@ -44,6 +48,8 @@ impl Default for RequestOptions {
             half_width_kana: false,
             version_string: None,
             typo_correction: TypoCorrectionMode::Automatic,
+            foreign_prediction: PredictionMode::Disabled,
+            keyboard_language: crate::KeyboardLanguage::None,
         }
     }
 }
@@ -121,6 +127,7 @@ pub struct ConversionSession {
     learning_memory: Option<LearningMemory>,
     learned_dictionary: Vec<DictionaryEntry>,
     stable_prediction_cache: Option<StablePredictionCache>,
+    foreign_completion_provider: Option<Arc<dyn ForeignCompletionProvider>>,
 }
 
 #[derive(Clone)]
@@ -176,6 +183,14 @@ impl ConversionSession {
         self.learning_memory = Some(memory);
         self.candidates.clear();
         Ok(())
+    }
+
+    pub fn set_foreign_completion_provider(
+        &mut self,
+        provider: Arc<dyn ForeignCompletionProvider>,
+    ) {
+        self.foreign_completion_provider = Some(provider);
+        self.candidates.clear();
     }
 
     pub fn refresh_learning(&mut self) -> Result<(), LearningError> {
@@ -348,6 +363,20 @@ impl ConversionSession {
         } else {
             self.predictions(converter, tables, 3, &additional)?
         };
+        let foreign_predictions = if options.foreign_prediction == PredictionMode::Disabled {
+            Vec::new()
+        } else {
+            self.foreign_completion_provider
+                .as_ref()
+                .map_or_else(Vec::new, |provider| {
+                    foreign_predictions(
+                        &self.composing,
+                        options.keyboard_language,
+                        provider.as_ref(),
+                        -5.0,
+                    )
+                })
+        };
         let mut leading: Vec<_> = full.iter().take(5).cloned().collect();
         let katakana = to_katakana(&self.composing.surface());
         leading.extend(
@@ -376,6 +405,10 @@ impl ConversionSession {
         leading = unique(leading);
         if options.japanese_prediction == PredictionMode::Automatic {
             leading.extend(predictions.iter().cloned());
+            leading = unique(leading);
+        }
+        if options.foreign_prediction == PredictionMode::Automatic {
+            leading.extend(foreign_predictions.iter().cloned());
             leading = unique(leading);
         }
         leading.sort_by(|left, right| right.value.total_cmp(&left.value));
@@ -441,7 +474,7 @@ impl ConversionSession {
         Ok(ConversionResult {
             main_results,
             prediction_results: predictions,
-            english_prediction_results: Vec::new(),
+            english_prediction_results: foreign_predictions,
             first_clause_results: first_clauses,
         })
     }

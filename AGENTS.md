@@ -9,6 +9,7 @@
 - Fcitx5 addon と daemon は Unix domain socket 上の Protobuf で通信する。
 - daemon の起動は fcitx5-mozc の方式に合わせ、addon が接続時に必要であれば daemon を直接起動する。systemd service や socket activation は利用しない。
 - ニューラル推論には、`flake.lock` で固定された nixpkgs の `pkgs.llama-cpp` を利用する。
+- 英語・ギリシャ語補完には、同じnixpkgsの`pkgs.hunspell`、`pkgs.hunspellDicts.en_US`および`pkgs.hunspellDicts.el_GR`を利用する。
 - 原作が利用する llama.cpp `b4846` と同じ source revision は要求せず、原作との挙動差は固定した `pkgs.llama-cpp` を使って検証する。
 - 対応するGGUFモデルは、[Miwa-Keita/zenz-v3.2-small-gguf](https://huggingface.co/Miwa-Keita/zenz-v3.2-small-gguf) の `ggml-model-Q5_K_M.gguf` だけとする。
 - flakeはモデルrepositoryのcommit `c67e03e07d215c869f591b274c1631170d3e11fe`とhash `sha256-KcIj1MIzJ7gP0T67WrJVUFekYxeZfV2jkVhP++8NtnM=`を持つ`pkgs.fetchurl` derivationを定義する。NixOS moduleはそのNix store pathをdaemonへ渡し、モデルを差し替えるoptionは公開しない。daemon自身もモデルをダウンロードしない。
@@ -57,6 +58,7 @@
 ### `crates/converter`
 
 - 辞書形式の読込、候補生成、経路探索、Zenzai prompt構築およびprefix制約付き再探索などの変換ロジックを所有する。
+- Hunspell C APIの最小binding、辞書encoding変換、英語・ギリシャ語候補合成を所有し、C pointerをcrate外へ露出させない。handleは生成した専用worker thread内に固定する。
 - Fcitx5、IPC、daemon のライフサイクル、llama.cpp の C API に依存させない。
 - OS 固有処理を持ち込まない。
 
@@ -108,7 +110,8 @@
 - 今後追加する利用者向けoptionも`programs.beankey`配下に置き、NixOS moduleを設定の唯一の公開境界とする。
 - モデルはflakeが固定した`pkgs.fetchurl { url; hash; }` derivationとしてNixOS moduleから参照し、利用者向けoptionにしない。
 - NixOS moduleはFcitx5 addon、daemon、辞書および固定モデルを導入し、`programs.beankey`から内部用のdaemon設定を生成する。
-- 直接packageする辞書、モデル、tokenizerおよび絵文字には、資産ごとのlicense本文、取得元、固定revision、attributionおよび変更有無を添付する。通常依存の`pkgs.llama-cpp`をこの資産台帳へ重複登録しない。
+- NixOS moduleはHunspellと固定nixpkgsの英語・ギリシャ語辞書を導入し、そのNix store pathを内部用daemon設定へ書く。辞書pathを利用者向けoptionにしない。
+- 直接packageする辞書、モデル、tokenizerおよび絵文字には、資産ごとのlicense本文、取得元、固定revision、attributionおよび変更有無を添付する。通常依存の`pkgs.llama-cpp`、`pkgs.hunspell`および`pkgs.hunspellDicts`をこの資産台帳へ重複登録しない。
 - flakeは`packages.<system>.daemon`、`packages.<system>.fcitx5-addon`、`packages.<system>.model`および`nixosModules.default`を公開する。
 - NixOS moduleは内部設定をTOMLとして生成し、`/etc/beankey/config.toml`からNix store上の生成物を参照させる。addonはdaemonを`--config /etc/beankey/config.toml`付きで起動する。
 - package境界は [fcitx5-mozc](https://github.com/NixOS/nixpkgs/blob/8c91a71d13451abc40eb9dae8910f972f979852f/pkgs/by-name/fc/fcitx5-mozc/package.nix#L36-L45) と [mozc](https://github.com/NixOS/nixpkgs/blob/8c91a71d13451abc40eb9dae8910f972f979852f/pkgs/by-name/mo/mozc/package.nix#L69-L105) を基準とする。
@@ -118,13 +121,14 @@
 - `programs.beankey`のNixOS moduleは提供するが、daemon起動専用のmoduleやsystemd unitは作成しない。
 - アプリケーションロジック、プロジェクト文書、テストデータを置かない。
 - llama.cpp は `pkgs.llama-cpp` を利用し、独立した flake input や独自 derivation を追加しない。
+- Hunspellと英語・ギリシャ語辞書はnixpkgs packageを利用し、sourceや辞書をvendorしない。
 - 実装が存在しない将来用ファイルは作成しない。
 
 ## 依存方向
 
 - `daemon` は `converter` と `llama` を利用し、`proto/beankey.proto` から生成した型を IPC に利用する。
 - `fcitx5` は `proto/beankey.proto` から生成した型を IPC に利用するが、Rust crate へ依存しない。
-- `converter` は実行時に渡されたパスから `data` の辞書を読むが、`daemon`、`fcitx5`、Protobuf または llama.cpp の C API へ依存しない。
+- `converter` は実行時に渡されたパスから `data` の辞書とHunspell辞書を読むが、`daemon`、`fcitx5`、Protobuf または llama.cpp の C API へ依存しない。
 - `llama` は `daemon`、`fcitx5` または Protobuf へ依存しない。
 - 上記と逆向きの依存が必要になった場合は、責務の置き場所を先に見直す。
 

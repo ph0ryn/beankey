@@ -202,7 +202,9 @@ CLIの参照経路では、選択candidateを `setCompletedData` と `updateLear
 
 #### 特殊候補・外部依存
 
-デフォルトのspecial providerはCalendar、EmailAddress、Unicode、Version、TimeExpression、CommaSeparatedNumberである（`KanaKanjiConverter.swift:51-58`）。追加providerとしてTypographyも型レベルでは提供されるが、対象コミットのdefault配列には入っていない（`SpecialCandidateProvider.swift:46-78`）。英語・ギリシャ語補完はFoundationのspell checker利用可否に依存する（`SpellChecker.swift:8-13`, `SpellChecker.swift:39-80`, `KanaKanjiConverter.swift:399-413`）。絵文字置換はdefault emoji resourceへ依存する。
+デフォルトのspecial providerはCalendar、EmailAddress、Unicode、Version、TimeExpression、CommaSeparatedNumberである（`KanaKanjiConverter.swift:51-58`）。追加providerとしてTypographyも型レベルでは提供されるが、対象コミットのdefault配列には入っていない（`SpecialCandidateProvider.swift:46-78`）。英語・ギリシャ語補完はFoundationのspell checker利用可否に依存し、非Apple分岐は常に`nil`を返す（`SpellChecker.swift:8-13`, `SpellChecker.swift:39-80`, `KanaKanjiConverter.swift:399-413`）。絵文字置換はdefault emoji resourceへ依存する。
+
+NixOSでこの公開機能を正常動作させるため、固定nixpkgs `0e251e24a4f24e036a084b6b4b2d2491af4167f4`のHunspell 1.7.3 C APIと`hunspellDicts.en_US`、`hunspellDicts.el_GR`を利用する。Hunspellはspell checkとsuggestionを提供するがAppleのprefix completion APIではないため、suggestionのうち入力を大文字小文字無視で前方一致するものだけを補完として扱う。固定packageによる実測では、`hel`から`heel`、`hell`、`held`、`helm`、`help`を、`καλ`から`καλά`、`καλό`、`καλέ`などを取得できる。el_GR辞書は`ISO8859-7`を宣言するため、C API入出力をUTF-8との間で変換する。
 
 #### LMベース誤入力訂正
 
@@ -215,7 +217,7 @@ CLIの参照経路では、選択candidateを `setCompletedData` と `updateLear
 ### 未確認事項
 
 - 製品UIが完全一致候補をどのタイミングで表示・自動確定するかは、このengineリポジトリだけでは決まらない。
-- Foundation spell checkerの各非Apple環境での同等性は未確認である。
+- Apple spell checkerとHunspellの候補列、語彙および順位の同等性はなく、後続の原作適合検証でもplatform差として分離する。
 
 ## 5. 辞書形式、生成・読み込み、必要なデータ資産
 

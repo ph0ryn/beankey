@@ -30,6 +30,7 @@ Fcitx5連携、変換デーモン、llama.cpp連携、NixパッケージとNixOS
 - デーモンの起動にsystemd serviceまたはsocket activationを使用しない。
 - Fcitx5側の入力コンテキスト状態、キーconsumed判定、プリエディット、候補および確定結果の反映はfcitx5-mozcに準拠する。
 - Zenzai推論には、`flake.lock`が固定するnixpkgsの`pkgs.llama-cpp`を直接使用する。
+- 英語・ギリシャ語補完には、同じnixpkgsの`pkgs.hunspell`、`pkgs.hunspellDicts.en_US`および`pkgs.hunspellDicts.el_GR`を使用する。
 - 原作が利用するllama.cpp `b4846`と同じsource revisionは要求しない。
 - 複数推論エンジン向けの汎用プラグイン層を作らない。
 - 設定GUIを作らず、NixOS設定を設定の情報源にする。
@@ -52,6 +53,8 @@ flowchart LR
     daemon["Rust変換デーモン"]
     core["Rustかな漢字変換コア"]
     dictionary["原作形式の辞書"]
+    hunspell["Hunspell補完境界"]
+    foreignDictionary["英語・ギリシャ語辞書"]
     llama["llama.cpp FFI境界"]
     model["Zenzai GGUFモデル"]
     nix["NixOS設定"]
@@ -62,10 +65,14 @@ flowchart LR
     daemon --> core
     daemon --> llama
     core --> dictionary
+    core --> hunspell
+    hunspell --> foreignDictionary
     llama --> model
     nix --> addon
     nix --> daemon
     nix --> dictionary
+    nix --> hunspell
+    nix --> foreignDictionary
     nix --> llama
     nix --> model
 ```
@@ -117,6 +124,7 @@ Zenzaiは候補配列の末尾で一度だけ動くリランカーではない�
 - 入力indexと表示indexを持つラティスを構築する
 - 辞書要素、接続コスト、意味コストを用いてN-best経路を求める
 - 全文、文節、単語、予測など、実装済み機能の候補を原作の規則に基づいて合成する
+- Hunspellの前方一致suggestionから英語・ギリシャ語補完候補を合成する
 - 候補の選択、入力消費範囲、部分確定、残入力を管理する
 - Zenzai評価要求を作り、prefix制約付き再探索へ戻す
 - 正常動作と状態復旧を診断できる構造化traceをテスト時に取得できるようにする
@@ -128,7 +136,7 @@ Zenzaiは候補配列の末尾で一度だけ動くリランカーではない�
 - デーモンの起動管理およびNixOS設定
 - 独自UI
 
-入力状態、辞書、ラティス、候補合成、確定、Zenzai向けのprompt構築とprefix制約付き再探索は`crates/converter`に置く。llama.cppのFFIと推論は`crates/llama`に置き、両者を使うZenzaiループの進行は`crates/daemon`に置く。各crate内のファイル分割は、実装開始時に公開境界を最小化して決める。
+入力状態、辞書、ラティス、候補合成、確定、Hunspellの最小C API境界、Zenzai向けのprompt構築とprefix制約付き再探索は`crates/converter`に置く。Hunspell handleは生成した専用worker thread内に固定し、pointerを公開しない。llama.cppのFFIと推論は`crates/llama`に置き、両者を使うZenzaiループの進行は`crates/daemon`に置く。各crate内のファイル分割は、実装開始時に公開境界を最小化して決める。
 
 ### 辞書読み込み
 
@@ -301,6 +309,7 @@ flowchart TD
     daemon --> core["変換コア"]
     daemon --> llama["llama.cpp FFI境界"]
     core --> dictionary["辞書reader"]
+    core --> hunspell["libhunspell"]
     llama --> libllama["libllama"]
 ```
 
@@ -319,6 +328,7 @@ flowchart TD
 - systemd serviceとsocket activationは使用しない。
 - アドオンとデーモンはローカルのUnixドメインソケットだけで通信する。
 - デーモンは辞書とllama.cppをNixストアから利用し、モデルはNixOS moduleが設定へ渡したNix store pathから読む。
+- デーモンは内部設定で渡されたNix store上のen_USおよびel_GR Hunspell辞書pathをconverterへ渡す。
 
 デーモンはユーザーごとに一つとし、`$XDG_RUNTIME_DIR/beankey/daemon.sock`で待ち受ける。`XDG_RUNTIME_DIR`がない場合は`/tmp`へfallbackせず起動に失敗する。`beankey`ディレクトリは所有UIDを確認してmode `0700`、socketはmode `0600`とし、peer credentialのUIDがdaemonのUIDと一致しない接続を拒否する。既存pathがsymlink、別ownerまたは期待するsocket以外なら削除せず起動に失敗する。
 
@@ -339,7 +349,7 @@ flowchart TD
 - 全機能で必要なtokenizerまたは絵文字データ
 - 本プロジェクトで作成する正常動作fixture
 
-`pkgs.llama-cpp`はnixpkgsからshared libraryとして導入する通常のpackage依存とし、本プロジェクトの直接配布資産へ複製しない。直接配布する第三者資産は、取得元、リビジョンまたはbyte hash、ビルド定義、ライセンス、attributionおよび変更有無を記録し、rootのMITだけですべてを扱わない。
+`pkgs.llama-cpp`、`pkgs.hunspell`、`pkgs.hunspellDicts.en_US`および`pkgs.hunspellDicts.el_GR`は、nixpkgsから導入する通常のpackage依存とし、本プロジェクトの直接配布資産へ複製しない。通常依存のlicense metadataと本文はnixpkgs packageに委ねる。直接配布する第三者資産は、取得元、リビジョンまたはbyte hash、ビルド定義、ライセンス、attributionおよび変更有無を記録し、rootのMITだけですべてを扱わない。
 
 - デフォルト辞書packageには、submodule `4d418525b090cf49c219819d05a7e3cc2a4346eb`のApache-2.0 `LICENSE`とCopyright 2024 Miwa / ensanをそのまま含める。固定revisionにNOTICEはない。
 - GGUF model packageはflake内の`pkgs.fetchurl`を入力とし、Apache-2.0本文、repository名、固定commit、filenameおよびhashをモデルと一緒に含める。固定revisionにLICENSEまたはNOTICEファイルはなく、model cardのlicense metadataがApache-2.0を宣言している。

@@ -9,6 +9,7 @@ rust-version = "1.85"
 
 [workspace.dependencies]
 chrono = "0.4.41"
+encoding_rs = "0.8.35"
 icu_calendar = "2.1.1"
 icu_datetime = "2.1.1"
 icu_locale = "2.1.1"

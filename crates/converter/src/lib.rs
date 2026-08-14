@@ -1,4 +1,5 @@
 mod dictionary;
+mod foreign;
 mod input;
 mod lattice;
 mod learning;
@@ -13,6 +14,9 @@ pub use dictionary::{
     CharacterIdMap, DictionaryBinaryError, DictionaryEntry, DictionaryError, DictionaryMatch,
     DictionaryMetadata, DictionaryStore, Louds, LoudsError, MeaningMatrix, UserDictionary,
     escaped_identifier, parse_connection_cost_line, parse_entry_block, parse_entry_shard,
+};
+pub use foreign::{
+    ForeignCompletionProvider, ForeignLanguage, HunspellCompleter, HunspellError, KeyboardLanguage,
 };
 pub use input::{
     ComposingCount, ComposingText, DifferenceSuffix, FormatError, FormatErrorKind, FormatReport,
