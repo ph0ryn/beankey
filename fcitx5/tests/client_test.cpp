@@ -5,6 +5,9 @@
 #include <unistd.h>
 
 #include <array>
+#ifdef NDEBUG
+#undef NDEBUG
+#endif
 #include <cassert>
 #include <chrono>
 #include <cstdint>
