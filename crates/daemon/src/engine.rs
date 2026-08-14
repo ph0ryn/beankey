@@ -6,7 +6,8 @@ use std::path::Path;
 use beankey_converter::{
     CompleteAction, ComposingCount as ConverterComposingCount, ConversionSession, DictionaryError,
     DictionaryStore, InputModifier, InputStyle as ConverterInputStyle, InputTableId,
-    InputTableRegistry, NormalConverter, RequestOptions, ZenzLanguageModel, ZenzVersionConfig,
+    InputTableRegistry, NormalConverter, RequestOptions, SelectionError, ZenzLanguageModel,
+    ZenzVersionConfig,
 };
 use beankey_llama::LlamaError;
 
@@ -32,7 +33,16 @@ struct SessionState {
     input_style: ConverterInputStyle,
     last_request_id: u64,
     selected_candidate: usize,
+    surrounding: SurroundingContext,
 }
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct SurroundingContext {
+    left: Option<String>,
+    right: Option<String>,
+}
+
+type SessionRequestResult<T> = Result<T, (Code, String)>;
 
 pub struct Engine {
     dictionary: DictionaryStore,
@@ -149,6 +159,17 @@ impl Engine {
                         "invalid input style",
                     );
                 };
+                let surrounding = match surrounding_context(start.surrounding_text.as_ref()) {
+                    Ok(surrounding) => surrounding,
+                    Err(message) => {
+                        return error_envelope(
+                            request_id,
+                            session_id,
+                            Code::InvalidPayload,
+                            message,
+                        );
+                    }
+                };
                 self.sessions.insert(
                     session_id.clone(),
                     SessionState {
@@ -156,6 +177,7 @@ impl Engine {
                         input_style,
                         last_request_id: request_id,
                         selected_candidate: 0,
+                        surrounding,
                     },
                 );
                 state_envelope(
@@ -225,7 +247,21 @@ impl Engine {
                     ..Default::default()
                 })
             }
-            Payload::KeyEvent(event) => self.handle_key(&mut session, event),
+            Payload::KeyEvent(event) => {
+                let updated = event
+                    .surrounding_text
+                    .as_ref()
+                    .map(|surrounding| surrounding_context(Some(surrounding)))
+                    .transpose();
+                match updated {
+                    Ok(Some(surrounding)) => {
+                        session.surrounding = surrounding;
+                        self.handle_key(&mut session, event)
+                    }
+                    Ok(None) => self.handle_key(&mut session, event),
+                    Err(message) => Err((Code::InvalidPayload, message)),
+                }
+            }
             Payload::SelectCandidate(selection) => {
                 self.select_candidate(&mut session, selection.index as usize)
             }
@@ -256,17 +292,19 @@ impl Engine {
             Payload::StartSession(_)
             | Payload::EndSession(_)
             | Payload::StateResponse(_)
-            | Payload::ProtocolError(_) => Err("invalid session request".into()),
+            | Payload::ProtocolError(_) => {
+                Err((Code::InvalidPayload, "invalid session request".into()))
+            }
         };
         self.sessions.insert(session_id.clone(), session);
         match response {
             Ok(response) => state_envelope(request_id, session_id, response),
-            Err(message) => {
+            Err((code, message)) => {
                 if let Some(session) = self.sessions.get_mut(&session_id) {
                     session.conversion.reset();
                     session.selected_candidate = 0;
                 }
-                error_envelope(request_id, session_id, Code::Internal, message)
+                error_envelope(request_id, session_id, code, message)
             }
         }
     }
@@ -275,7 +313,7 @@ impl Engine {
         &mut self,
         session: &mut SessionState,
         event: protocol::KeyEvent,
-    ) -> Result<protocol::StateResponse, String> {
+    ) -> SessionRequestResult<protocol::StateResponse> {
         if event.release {
             return Ok(make_state(session, false, String::new(), false));
         }
@@ -371,11 +409,20 @@ impl Engine {
         &mut self,
         session: &mut SessionState,
         index: usize,
-    ) -> Result<protocol::StateResponse, String> {
+    ) -> SessionRequestResult<protocol::StateResponse> {
         let commit = session
             .conversion
             .select_candidate(index, &self.tables)
-            .map_err(|error| format!("candidate selection failed: {error}"))?;
+            .map_err(|error| match error {
+                SelectionError::CandidateOutOfRange { .. } => (
+                    Code::InvalidPayload,
+                    format!("candidate selection failed: {error}"),
+                ),
+                SelectionError::Learning(_) => (
+                    Code::Internal,
+                    format!("candidate selection failed: {error}"),
+                ),
+            })?;
         session.selected_candidate = 0;
         if !session.conversion.composing().is_empty() {
             self.request_candidates(session)?;
@@ -388,26 +435,76 @@ impl Engine {
         ))
     }
 
-    fn request_candidates(&mut self, session: &mut SessionState) -> Result<(), String> {
+    fn request_candidates(&mut self, session: &mut SessionState) -> SessionRequestResult<()> {
         let converter = NormalConverter::new(&self.dictionary);
         if let Some(model) = self.zenz_model.as_deref_mut() {
+            let version = version_with_context(&self.zenz_version, &session.surrounding);
             zenz::convert(
                 &mut session.conversion,
                 &converter,
                 &self.tables,
                 model,
-                &self.zenz_version,
+                &version,
                 self.zenz_rich_candidates,
                 self.zenz_inference_limit,
             )
-            .map_err(|error| format!("Zenz candidate generation failed: {error}"))?;
+            .map_err(|error| {
+                (
+                    Code::Internal,
+                    format!("Zenz candidate generation failed: {error}"),
+                )
+            })?;
         } else {
             session
                 .conversion
                 .request(&converter, &self.tables, RequestOptions::default())
-                .map_err(|error| format!("candidate generation failed: {error}"))?;
+                .map_err(|error| {
+                    (
+                        Code::Internal,
+                        format!("candidate generation failed: {error}"),
+                    )
+                })?;
         }
         Ok(())
+    }
+}
+
+fn surrounding_context(
+    surrounding: Option<&protocol::SurroundingText>,
+) -> Result<SurroundingContext, String> {
+    let Some(surrounding) = surrounding.filter(|surrounding| surrounding.available) else {
+        return Ok(SurroundingContext::default());
+    };
+    let character_count = surrounding.text.chars().count();
+    let cursor = surrounding.cursor as usize;
+    let anchor = surrounding.anchor as usize;
+    if cursor > character_count || anchor > character_count {
+        return Err(format!(
+            "surrounding text cursor {cursor} and anchor {anchor} exceed {character_count} characters"
+        ));
+    }
+    let selection_start = cursor.min(anchor);
+    let selection_end = cursor.max(anchor);
+    Ok(SurroundingContext {
+        left: Some(surrounding.text.chars().take(selection_start).collect()),
+        right: Some(surrounding.text.chars().skip(selection_end).collect()),
+    })
+}
+
+fn version_with_context(
+    version: &ZenzVersionConfig,
+    surrounding: &SurroundingContext,
+) -> ZenzVersionConfig {
+    match version.clone() {
+        ZenzVersionConfig::V2(mut config) => {
+            config.left_context.clone_from(&surrounding.left);
+            ZenzVersionConfig::V2(config)
+        }
+        ZenzVersionConfig::V3(mut config) => {
+            config.left_context.clone_from(&surrounding.left);
+            config.right_context.clone_from(&surrounding.right);
+            ZenzVersionConfig::V3(config)
+        }
     }
 }
 
@@ -538,5 +635,66 @@ fn error_envelope(
             message: message.into(),
         })),
         trace: Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use beankey_converter::{ZenzV3Config, ZenzVersionConfig};
+
+    use super::*;
+
+    #[test]
+    fn splits_fcitx_surrounding_text_around_the_selection() {
+        let context = surrounding_context(Some(&protocol::SurroundingText {
+            available: true,
+            text: "甲😀選択乙".into(),
+            cursor: 4,
+            anchor: 2,
+        }))
+        .unwrap();
+
+        assert_eq!(context.left.as_deref(), Some("甲😀"));
+        assert_eq!(context.right.as_deref(), Some("乙"));
+    }
+
+    #[test]
+    fn rejects_out_of_range_surrounding_text_positions() {
+        let error = surrounding_context(Some(&protocol::SurroundingText {
+            available: true,
+            text: "甲😀".into(),
+            cursor: 3,
+            anchor: 2,
+        }))
+        .unwrap_err();
+
+        assert!(error.contains("exceed 2 characters"));
+    }
+
+    #[test]
+    fn applies_dynamic_context_without_replacing_zenz_conditions() {
+        let version = ZenzVersionConfig::V3(ZenzV3Config {
+            profile: Some("profile".into()),
+            left_context: Some("stale left".into()),
+            right_context: Some("stale right".into()),
+            ..Default::default()
+        });
+        let updated = version_with_context(
+            &version,
+            &SurroundingContext {
+                left: Some("left".into()),
+                right: Some("right".into()),
+            },
+        );
+
+        assert_eq!(
+            updated,
+            ZenzVersionConfig::V3(ZenzV3Config {
+                profile: Some("profile".into()),
+                left_context: Some("left".into()),
+                right_context: Some("right".into()),
+                ..Default::default()
+            })
+        );
     }
 }

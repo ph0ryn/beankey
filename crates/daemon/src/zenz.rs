@@ -100,6 +100,7 @@ pub fn convert(
     inference_limit: usize,
 ) -> Result<(), ZenzConversionError> {
     let input = to_katakana(&session.composing().surface());
+    let input_cursor_position = Some(session.composing().cursor());
     let mut constraint = PrefixConstraint::default();
 
     for inference in 0..=inference_limit {
@@ -130,7 +131,7 @@ pub fn convert(
             model,
             ZenzEvaluationRequest {
                 input: &input,
-                input_cursor_position: None,
+                input_cursor_position,
                 candidate,
                 request_rich_candidates,
                 prefix_constraint: &constraint,
@@ -251,13 +252,14 @@ mod tests {
 
     use beankey_converter::{
         ConversionSession, DictionaryStore, InputStyle, InputTableRegistry, NormalConverter,
-        ZenzInferenceError, ZenzLanguageModel, ZenzVersionConfig,
+        ZenzInferenceError, ZenzLanguageModel, ZenzV3Config, ZenzVersionConfig,
     };
 
     use super::convert;
 
     struct PrefixModel {
         evaluations: usize,
+        prompts: Vec<String>,
     }
 
     impl ZenzLanguageModel for PrefixModel {
@@ -274,6 +276,9 @@ mod tests {
             text: &str,
             add_special: bool,
         ) -> Result<Vec<i32>, ZenzInferenceError> {
+            if add_special {
+                self.prompts.push(text.to_owned());
+            }
             Ok(if add_special {
                 vec![1]
             } else if text == "箸" {
@@ -313,7 +318,10 @@ mod tests {
     fn constrains_a_retried_draft_to_the_model_prefix() {
         let (dictionary, tables, mut session) = session();
         let converter = NormalConverter::new(&dictionary);
-        let mut model = PrefixModel { evaluations: 0 };
+        let mut model = PrefixModel {
+            evaluations: 0,
+            prompts: Vec::new(),
+        };
 
         convert(
             &mut session,
@@ -334,7 +342,10 @@ mod tests {
     fn returns_the_initial_draft_when_the_inference_limit_is_zero() {
         let (dictionary, tables, mut session) = session();
         let converter = NormalConverter::new(&dictionary);
-        let mut model = PrefixModel { evaluations: 0 };
+        let mut model = PrefixModel {
+            evaluations: 0,
+            prompts: Vec::new(),
+        };
 
         convert(
             &mut session,
@@ -349,5 +360,37 @@ mod tests {
 
         assert!(!session.candidates().is_empty());
         assert_eq!(model.evaluations, 0);
+    }
+
+    #[test]
+    fn includes_the_internal_composition_cursor_in_the_zenz_prompt() {
+        let (dictionary, tables, mut session) = session();
+        session.move_cursor(-1);
+        let converter = NormalConverter::new(&dictionary);
+        let mut model = PrefixModel {
+            evaluations: 0,
+            prompts: Vec::new(),
+        };
+
+        convert(
+            &mut session,
+            &converter,
+            &tables,
+            &mut model,
+            &ZenzVersionConfig::V3(ZenzV3Config {
+                enable_alignment_separator: true,
+                ..Default::default()
+            }),
+            false,
+            1,
+        )
+        .unwrap();
+
+        assert!(
+            model
+                .prompts
+                .iter()
+                .any(|prompt| prompt.contains("\u{ee00}ハ\u{ee08}シ\u{ee01}"))
+        );
     }
 }

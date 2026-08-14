@@ -129,6 +129,31 @@ fn isolates_sessions_and_rejects_out_of_order_requests() {
     response(engine.handle(other));
 }
 
+#[test]
+fn rejects_invalid_surrounding_text_and_resets_the_session() {
+    let mut engine = Engine::open(dictionary_root()).unwrap();
+    let rejected = engine.handle(envelope(
+        1,
+        Payload::StartSession(protocol::StartSession {
+            input_style: protocol::InputStyle::Direct as i32,
+            surrounding_text: Some(protocol::SurroundingText {
+                available: true,
+                text: "文脈".into(),
+                cursor: 3,
+                anchor: 0,
+            }),
+        }),
+    ));
+
+    let Some(Payload::ProtocolError(error)) = rejected.payload else {
+        panic!("expected a protocol error");
+    };
+    assert_eq!(
+        error.code,
+        protocol::protocol_error::Code::InvalidPayload as i32
+    );
+}
+
 struct PrefixModel;
 
 impl ZenzLanguageModel for PrefixModel {
