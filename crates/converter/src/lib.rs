@@ -6,6 +6,7 @@ mod post_prediction;
 mod session;
 mod special;
 mod template;
+mod text_replacer;
 mod typo;
 
 pub use dictionary::{
@@ -29,3 +30,4 @@ pub use session::{
 };
 pub use special::special_candidates;
 pub use template::expand_templates;
+pub use text_replacer::{ReplacementCandidate, TextReplacer, TextReplacerError, TextSearchResult};

@@ -1,7 +1,10 @@
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::lattice::{includes_meaning, prediction_usable};
-use crate::{Candidate, ComposingCount, DictionaryEntry, DictionaryError, DictionaryStore};
+use crate::{
+    Candidate, ComposingCount, DictionaryEntry, DictionaryError, DictionaryMetadata,
+    DictionaryStore, TextReplacer,
+};
 
 const BOS_CLASS_ID: usize = 0;
 const BOS_MEANING_ID: usize = 500;
@@ -74,11 +77,25 @@ impl PostCompositionPrediction {
 
 pub struct PostCompositionPredictor<'a> {
     dictionary: &'a DictionaryStore,
+    text_replacer: Option<&'a TextReplacer>,
 }
 
 impl<'a> PostCompositionPredictor<'a> {
     pub fn new(dictionary: &'a DictionaryStore) -> Self {
-        Self { dictionary }
+        Self {
+            dictionary,
+            text_replacer: None,
+        }
+    }
+
+    pub fn with_text_replacer(
+        dictionary: &'a DictionaryStore,
+        text_replacer: &'a TextReplacer,
+    ) -> Self {
+        Self {
+            dictionary,
+            text_replacer: Some(text_replacer),
+        }
     }
 
     pub fn predict(
@@ -105,13 +122,24 @@ impl<'a> PostCompositionPredictor<'a> {
             })
             .collect();
         let replacements = self.replacements(candidate, 15)?;
-        let replacement_count = 5_usize.max(10_usize.saturating_sub(zero_hints.len()));
-        let mut output = unique(replacements)
+        let emoji_candidates = self.emoji_candidates(candidate);
+        let mut output = unique(emoji_candidates)
             .into_iter()
-            .take(replacement_count)
+            .rev()
+            .take(3)
             .collect::<Vec<_>>();
-        let seen: std::collections::HashSet<_> =
+        output.reverse();
+        let prediction_count =
+            ((10 - output.len()) / 2).max(10_usize.saturating_sub(output.len() + zero_hints.len()));
+        let mut seen: std::collections::HashSet<_> =
             output.iter().map(|item| item.text.clone()).collect();
+        let predictions = unique(replacements)
+            .into_iter()
+            .filter(|item| !seen.contains(&item.text))
+            .take(prediction_count)
+            .collect::<Vec<_>>();
+        seen.extend(predictions.iter().map(|item| item.text.clone()));
+        output.extend(predictions);
         output.extend(
             unique(zero_hints)
                 .into_iter()
@@ -119,6 +147,36 @@ impl<'a> PostCompositionPredictor<'a> {
                 .take(10_usize.saturating_sub(output.len())),
         );
         Ok(output)
+    }
+
+    fn emoji_candidates(&self, candidate: &Candidate) -> Vec<PostCompositionPrediction> {
+        let Some(replacer) = self.text_replacer else {
+            return Vec::new();
+        };
+        candidate
+            .entries
+            .iter()
+            .filter(|entry| includes_meaning(entry))
+            .flat_map(|entry| replacer.search(&entry.word, true))
+            .map(|emoji| {
+                PostCompositionPrediction::new(
+                    emoji.text.clone(),
+                    -3.0,
+                    PostPredictionKind::Additional {
+                        entries: vec![DictionaryEntry {
+                            word: emoji.text,
+                            ruby: "エモジ".into(),
+                            left_id: 5,
+                            right_id: 5,
+                            meaning_id: 501,
+                            base_value: -3.0,
+                            adjustment: 0.0,
+                            metadata: DictionaryMetadata::default(),
+                        }],
+                    },
+                )
+            })
+            .collect()
     }
 
     fn zero_hints(
