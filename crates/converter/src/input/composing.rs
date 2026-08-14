@@ -30,6 +30,7 @@ impl InputStyle {
 pub struct InputTableRegistry {
     empty: InputTable,
     roman_to_kana: InputTable,
+    azik: InputTable,
     custom: HashMap<String, InputTable>,
 }
 
@@ -38,6 +39,7 @@ impl Default for InputTableRegistry {
         Self {
             empty: InputTable::empty(),
             roman_to_kana: InputTable::default_roman_to_kana(),
+            azik: InputTable::default_azik(),
             custom: HashMap::new(),
         }
     }
@@ -58,14 +60,13 @@ impl InputTableRegistry {
             InputStyle::RomanToKana => Some(&self.roman_to_kana),
             InputStyle::Mapped(InputTableId::Empty) => Some(&self.empty),
             InputStyle::Mapped(InputTableId::DefaultRomanToKana) => Some(&self.roman_to_kana),
+            InputStyle::Mapped(InputTableId::DefaultAzik) => Some(&self.azik),
             InputStyle::Mapped(InputTableId::Named(name)) => {
                 Some(self.custom.get(name).unwrap_or(&self.empty))
             }
-            InputStyle::Mapped(
-                InputTableId::DefaultAzik
-                | InputTableId::DefaultKanaJis
-                | InputTableId::DefaultKanaUs,
-            ) => Some(&self.empty),
+            InputStyle::Mapped(InputTableId::DefaultKanaJis | InputTableId::DefaultKanaUs) => {
+                Some(&self.empty)
+            }
         }
     }
 }
@@ -578,5 +579,22 @@ mod tests {
         assert_eq!(text.surface(), "ばす");
         assert_eq!(text.input()[0].piece, InputPiece::character("ば"));
         assert_eq!(text.input()[0].input_style, InputStyle::frozen());
+    }
+
+    #[test]
+    fn composes_and_partially_completes_azik_input() {
+        let tables = InputTableRegistry::new();
+        let mut text = ComposingText::new();
+        text.insert_str(
+            "szzz",
+            InputStyle::Mapped(InputTableId::DefaultAzik),
+            &tables,
+        );
+        assert_eq!(text.surface(), "さんざん");
+
+        text.complete_prefix(ComposingCount::Surface(3), &tables);
+
+        assert_eq!(text.surface(), "ん");
+        assert_eq!(text.input()[0].piece, InputPiece::character("ん"));
     }
 }

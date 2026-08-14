@@ -136,6 +136,15 @@ impl InputTable {
         Self::new(entries)
     }
 
+    pub fn default_azik() -> Self {
+        let mut entries = simple_tsv_entries(include_str!("azik.tsv"));
+        entries.push((
+            vec![KeyElement::Piece(InputPiece::CompositionSeparator)],
+            vec![],
+        ));
+        Self::new(entries)
+    }
+
     pub fn combined(tables: impl IntoIterator<Item = Self>) -> Self {
         Self::new(tables.into_iter().flat_map(|table| {
             table
@@ -277,6 +286,25 @@ pub(crate) fn graphemes(value: &str) -> Vec<Grapheme> {
         .collect()
 }
 
+fn simple_tsv_entries(source: &str) -> Vec<(Vec<KeyElement>, Vec<ValueElement>)> {
+    source
+        .lines()
+        .filter_map(|line| line.split_once('\t'))
+        .map(|(key, value)| {
+            (
+                graphemes(key)
+                    .into_iter()
+                    .map(|value| KeyElement::Piece(InputPiece::Character(value)))
+                    .collect(),
+                graphemes(value)
+                    .into_iter()
+                    .map(ValueElement::Character)
+                    .collect(),
+            )
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -365,5 +393,14 @@ mod tests {
             InputTable::combined([first, second]).applied("", InputPiece::character("a")),
             "安"
         );
+    }
+
+    #[test]
+    fn converts_azik_sequences() {
+        let table = InputTable::default_azik();
+
+        assert_eq!(type_text(&table, "szzz"), "さんざん");
+        assert_eq!(type_text(&table, "kz"), "かん");
+        assert_eq!(type_text(&table, "ds"), "です");
     }
 }
