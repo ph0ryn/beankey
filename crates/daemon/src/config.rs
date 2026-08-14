@@ -29,6 +29,8 @@ pub struct DaemonConfig {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct ConversionConfig {
+    pub input_style: InputStyleConfig,
+    pub custom_input_table: Option<String>,
     pub n_best: usize,
     pub japanese_prediction: PredictionConfig,
     pub foreign_prediction: PredictionConfig,
@@ -45,6 +47,8 @@ pub struct ConversionConfig {
 impl Default for ConversionConfig {
     fn default() -> Self {
         Self {
+            input_style: InputStyleConfig::RomanToKana,
+            custom_input_table: None,
             n_best: 10,
             japanese_prediction: PredictionConfig::Automatic,
             foreign_prediction: PredictionConfig::Automatic,
@@ -58,6 +62,18 @@ impl Default for ConversionConfig {
             custom_input_tables: BTreeMap::new(),
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum InputStyleConfig {
+    Direct,
+    #[default]
+    RomanToKana,
+    Azik,
+    KanaJis,
+    KanaUs,
+    Custom,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
@@ -187,6 +203,7 @@ pub enum DaemonConfigError {
     Parse(toml::de::Error),
     InvalidRuntimeSocket,
     InvalidConversionCandidateCount,
+    InvalidDefaultInputTable,
     InvalidPersonalizationAlpha,
     InvalidLmTypoConfiguration,
     UnsupportedInferenceProfile(InferenceConfig),
@@ -202,6 +219,9 @@ impl fmt::Display for DaemonConfigError {
             }
             Self::InvalidConversionCandidateCount => {
                 write!(formatter, "conversion.n_best must be greater than zero")
+            }
+            Self::InvalidDefaultInputTable => {
+                write!(formatter, "conversion.custom_input_table is not registered")
             }
             Self::InvalidPersonalizationAlpha => {
                 write!(
@@ -231,6 +251,7 @@ impl Error for DaemonConfigError {
             Self::Parse(error) => Some(error),
             Self::InvalidRuntimeSocket
             | Self::InvalidConversionCandidateCount
+            | Self::InvalidDefaultInputTable
             | Self::InvalidPersonalizationAlpha
             | Self::InvalidLmTypoConfiguration
             | Self::UnsupportedInferenceProfile(_) => None,
@@ -272,6 +293,15 @@ impl DaemonConfig {
         }
         if self.conversion.n_best == 0 {
             return Err(DaemonConfigError::InvalidConversionCandidateCount);
+        }
+        if self.conversion.input_style == InputStyleConfig::Custom
+            && self
+                .conversion
+                .custom_input_table
+                .as_ref()
+                .is_none_or(|name| !self.conversion.custom_input_tables.contains_key(name))
+        {
+            return Err(DaemonConfigError::InvalidDefaultInputTable);
         }
         if self
             .zenz
@@ -323,6 +353,7 @@ english_dictionary = "/nix/store/en_US"
 greek_dictionary = "/nix/store/el_GR"
 
 [conversion]
+input_style = "roman_to_kana"
 n_best = 10
 japanese_prediction = "automatic"
 foreign_prediction = "automatic"
@@ -419,6 +450,18 @@ flash_attention = true
         assert!(matches!(
             DaemonConfig::parse(&config),
             Err(DaemonConfigError::InvalidLmTypoConfiguration)
+        ));
+    }
+
+    #[test]
+    fn requires_a_registered_default_custom_input_table() {
+        let config = CONFIG.replace(
+            "input_style = \"roman_to_kana\"",
+            "input_style = \"custom\"\ncustom_input_table = \"missing\"",
+        );
+        assert!(matches!(
+            DaemonConfig::parse(&config),
+            Err(DaemonConfigError::InvalidDefaultInputTable)
         ));
     }
 }

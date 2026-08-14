@@ -19,7 +19,8 @@ use beankey_llama::LlamaError;
 use serde::Deserialize;
 
 use crate::config::{
-    ConversionConfig, DaemonConfig, LmTypoLanguageModel, PredictionConfig, TypoCorrectionConfig,
+    ConversionConfig, DaemonConfig, InputStyleConfig, LmTypoLanguageModel, PredictionConfig,
+    TypoCorrectionConfig,
 };
 use crate::protocol::composing_count::Count;
 use crate::protocol::envelope::Payload;
@@ -79,6 +80,7 @@ pub struct Engine {
     user_dictionary_directory: Option<PathBuf>,
     request_options: RequestOptions,
     live_conversion: bool,
+    default_input_style: ConverterInputStyle,
 }
 
 #[derive(Debug)]
@@ -232,6 +234,7 @@ impl Engine {
             user_dictionary_directory: None,
             request_options: default_request_options(),
             live_conversion: false,
+            default_input_style: ConverterInputStyle::RomanToKana,
         })
     }
 
@@ -271,7 +274,7 @@ impl Engine {
         engine.load_learning(learning_directory)?;
         engine.load_text_replacer(&config.emoji_dictionary)?;
         engine.load_conversion_resources(&config.conversion)?;
-        engine.apply_conversion_options(&config.conversion);
+        engine.apply_conversion_options(&config.conversion)?;
         engine.apply_zenz_options(&config.zenz);
         engine.load_zenz_personalization(&config.zenz)?;
         engine.load_lm_typo(&config.lm_typo)?;
@@ -312,7 +315,7 @@ impl Engine {
     ) -> Result<Self, EngineOpenError> {
         let mut engine = Self::open(dictionary_path)?;
         engine.load_conversion_resources(conversion)?;
-        engine.apply_conversion_options(conversion);
+        engine.apply_conversion_options(conversion)?;
         Ok(engine)
     }
 
@@ -396,7 +399,10 @@ impl Engine {
         Ok(())
     }
 
-    fn apply_conversion_options(&mut self, conversion: &ConversionConfig) {
+    fn apply_conversion_options(
+        &mut self,
+        conversion: &ConversionConfig,
+    ) -> Result<(), ConversionResourceError> {
         self.request_options = RequestOptions {
             n_best: conversion.n_best,
             japanese_prediction: prediction_mode(conversion.japanese_prediction),
@@ -408,6 +414,24 @@ impl Engine {
             ..default_request_options()
         };
         self.live_conversion = conversion.live_conversion;
+        self.default_input_style = match conversion.input_style {
+            InputStyleConfig::Direct => ConverterInputStyle::Direct,
+            InputStyleConfig::RomanToKana => ConverterInputStyle::RomanToKana,
+            InputStyleConfig::Azik => ConverterInputStyle::Mapped(InputTableId::DefaultAzik),
+            InputStyleConfig::KanaJis => ConverterInputStyle::Mapped(InputTableId::DefaultKanaJis),
+            InputStyleConfig::KanaUs => ConverterInputStyle::Mapped(InputTableId::DefaultKanaUs),
+            InputStyleConfig::Custom => {
+                let name = conversion
+                    .custom_input_table
+                    .as_ref()
+                    .filter(|name| self.tables.contains(name))
+                    .ok_or_else(|| ConversionResourceError::InvalidInputTable {
+                        name: conversion.custom_input_table.clone().unwrap_or_default(),
+                    })?;
+                ConverterInputStyle::Mapped(InputTableId::Named(name.clone()))
+            }
+        };
+        Ok(())
     }
 
     fn apply_zenz_options(&mut self, config: &crate::config::ZenzConfig) {
@@ -505,9 +529,14 @@ impl Engine {
                         "request ID is not greater than the previous request",
                     );
                 }
-                let Some(input_style) =
+                let input_style = if protocol::InputStyle::try_from(start.input_style)
+                    == Ok(protocol::InputStyle::Unspecified)
+                {
+                    Some(self.default_input_style.clone())
+                } else {
                     input_style(start.input_style, &start.custom_input_table, &self.tables)
-                else {
+                };
+                let Some(input_style) = input_style else {
                     return error_envelope(
                         request_id,
                         session_id,

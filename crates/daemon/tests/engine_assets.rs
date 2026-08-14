@@ -90,6 +90,38 @@ fn converts_selects_commits_and_resets_a_session() {
 }
 
 #[test]
+fn uses_the_configured_input_style_when_the_addon_does_not_override_it() {
+    let mut engine =
+        Engine::open_with_conversion_resources(dictionary_root(), &ConversionConfig::default())
+            .unwrap();
+    response(engine.handle(envelope(
+        1,
+        Payload::StartSession(protocol::StartSession {
+            input_style: protocol::InputStyle::Unspecified as i32,
+            surrounding_text: None,
+            keyboard_language: protocol::KeyboardLanguage::Japanese as i32,
+            custom_input_table: String::new(),
+        }),
+    )));
+
+    let converted = response(engine.handle(envelope(
+        2,
+        Payload::KeyEvent(protocol::KeyEvent {
+            text: "shikai".into(),
+            ..Default::default()
+        }),
+    )));
+
+    assert_eq!(converted.preedit, "しかい");
+    assert!(
+        converted
+            .candidates
+            .iter()
+            .any(|candidate| candidate.text == "司会")
+    );
+}
+
+#[test]
 fn forwards_explicit_kana_key_intention_and_input() {
     let mut engine = Engine::open(dictionary_root()).unwrap();
     response(engine.handle(envelope(

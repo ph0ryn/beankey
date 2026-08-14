@@ -92,6 +92,7 @@ english_dictionary = "{english}"
 greek_dictionary = "{greek}"
 
 [conversion]
+input_style = "roman_to_kana"
 n_best = 10
 japanese_prediction = "automatic"
 foreign_prediction = "automatic"
