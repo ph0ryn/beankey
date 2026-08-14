@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
 
@@ -399,6 +400,120 @@ pub fn evaluate_candidate(
     })
 }
 
+pub struct ZenzInputGenerationRequest<'a> {
+    pub left_context: &'a str,
+    pub composing_text: &'a str,
+    pub count: usize,
+    pub min_length: usize,
+    pub max_entropy: Option<f32>,
+    pub version: &'a ZenzVersionConfig,
+    pub possible_nexts: &'a [String],
+}
+
+pub fn generate_next_input(
+    model: &mut dyn ZenzLanguageModel,
+    request: ZenzInputGenerationRequest<'_>,
+) -> Result<String, ZenzInferenceError> {
+    if request.count == 0 {
+        return Ok(String::new());
+    }
+    let Some(prompt) = ZenzPromptBuilder::input_prediction(
+        request.left_context,
+        request.composing_text,
+        request.version,
+    ) else {
+        return Ok(String::new());
+    };
+    let allowed_prefixes: Vec<_> = request
+        .possible_nexts
+        .iter()
+        .filter(|prefix| !prefix.is_empty())
+        .collect();
+    let is_allowed = |candidate: &str| {
+        allowed_prefixes.is_empty()
+            || allowed_prefixes
+                .iter()
+                .any(|prefix| prefix.starts_with(&to_katakana(candidate)))
+    };
+    let mut prompt_tokens = model.tokenize(&prompt, true)?;
+    let min_length = request.min_length.clamp(1, request.count);
+    let vocabulary_size = model.vocabulary_size();
+    let mut predicted = String::new();
+    let mut predicted_count = 0;
+
+    for _ in 0..request.count {
+        let logits = model.next_logits(&prompt_tokens)?;
+        if logits.len() != vocabulary_size || logits.is_empty() {
+            return Err(ZenzInferenceError(format!(
+                "model returned {} logits for a vocabulary of {vocabulary_size}",
+                logits.len()
+            )));
+        }
+        let mut token_penalties = HashMap::<i32, f32>::new();
+        for (index, token) in prompt_tokens.iter().copied().enumerate() {
+            *token_penalties.entry(token).or_default() +=
+                2.0 / (prompt_tokens.len() - index) as f32;
+        }
+        let mut sum_exp = 0.0_f32;
+        let mut sum_exp_value = 0.0_f32;
+        let mut best_value = f32::NEG_INFINITY;
+        let mut best_character = None;
+        let mut best_next_text = String::new();
+
+        for (token, logit) in logits.into_iter().enumerate() {
+            let token = i32::try_from(token)
+                .map_err(|_| ZenzInferenceError("vocabulary exceeds i32".into()))?;
+            let value = logit / (1.0 + token_penalties.get(&token).copied().unwrap_or_default());
+            let exponential = value.exp();
+            sum_exp += exponential;
+            sum_exp_value += exponential * value;
+            if value <= best_value {
+                continue;
+            }
+            let piece = model.token_to_piece(token)?;
+            let Ok(piece) = std::str::from_utf8(&piece) else {
+                continue;
+            };
+            let Some(character) = UnicodeSegmentation::graphemes(piece, true).next() else {
+                continue;
+            };
+            let next_text = format!("{predicted}{character}");
+            if !is_allowed(&next_text) {
+                continue;
+            }
+            best_value = value;
+            best_character = Some(character.to_owned());
+            best_next_text = next_text;
+        }
+
+        if let Some(max_entropy) = request.max_entropy
+            && predicted_count >= min_length
+            && sum_exp > 0.0
+        {
+            let entropy = sum_exp.ln() - sum_exp_value / sum_exp;
+            if entropy >= max_entropy {
+                break;
+            }
+        }
+        let Some(character) = best_character else {
+            break;
+        };
+        if matches!(character.as_str(), "、" | "。" | "！" | "？") && predicted_count >= min_length
+        {
+            break;
+        }
+        predicted = best_next_text;
+        predicted_count += 1;
+        let appended = model.tokenize(&character, false)?;
+        if appended.is_empty() {
+            break;
+        }
+        prompt_tokens.extend(appended);
+    }
+
+    Ok(predicted)
+}
+
 fn personalized_logits(
     logits: Vec<f32>,
     candidate_prefix: &[i32],
@@ -568,6 +683,45 @@ mod tests {
         script: Script,
     }
 
+    struct InputPredictionModel {
+        evaluations: usize,
+    }
+
+    impl ZenzLanguageModel for InputPredictionModel {
+        fn vocabulary_size(&self) -> usize {
+            5
+        }
+
+        fn eos_token(&self) -> i32 {
+            2
+        }
+
+        fn tokenize(
+            &mut self,
+            _text: &str,
+            add_special: bool,
+        ) -> Result<Vec<i32>, ZenzInferenceError> {
+            Ok(if add_special { vec![1] } else { vec![3] })
+        }
+
+        fn token_to_piece(&mut self, token: i32) -> Result<Vec<u8>, ZenzInferenceError> {
+            Ok(match token {
+                3 => "カ".as_bytes().to_vec(),
+                4 => "。".as_bytes().to_vec(),
+                _ => Vec::new(),
+            })
+        }
+
+        fn next_logits(&mut self, tokens: &[i32]) -> Result<Vec<f32>, ZenzInferenceError> {
+            self.evaluations += 1;
+            Ok(if tokens.contains(&3) {
+                vec![-10.0, -10.0, -10.0, 0.0, 10.0]
+            } else {
+                vec![-10.0, -10.0, -10.0, 10.0, 0.0]
+            })
+        }
+    }
+
     impl ZenzLanguageModel for ScriptedModel {
         fn vocabulary_size(&self) -> usize {
             6
@@ -696,6 +850,45 @@ mod tests {
             ZenzPromptBuilder::candidate_evaluation("ハシ", Some(2), "", &config),
             "\u{EE00}ハシ\u{EE01}"
         );
+    }
+
+    #[test]
+    fn generates_v3_input_until_punctuation_after_the_minimum_length() {
+        let mut model = InputPredictionModel { evaluations: 0 };
+        let prediction = generate_next_input(
+            &mut model,
+            ZenzInputGenerationRequest {
+                left_context: "今日は",
+                composing_text: "",
+                count: 10,
+                min_length: 1,
+                max_entropy: Some(3.0),
+                version: &ZenzVersionConfig::default(),
+                possible_nexts: &[],
+            },
+        )
+        .unwrap();
+        assert_eq!(prediction, "カ");
+        assert_eq!(model.evaluations, 2);
+    }
+
+    #[test]
+    fn constrains_generated_input_to_pending_roman_prefixes() {
+        let mut model = InputPredictionModel { evaluations: 0 };
+        let prediction = generate_next_input(
+            &mut model,
+            ZenzInputGenerationRequest {
+                left_context: "",
+                composing_text: "",
+                count: 10,
+                min_length: 1,
+                max_entropy: None,
+                version: &ZenzVersionConfig::default(),
+                possible_nexts: &["キ".into()],
+            },
+        )
+        .unwrap();
+        assert!(prediction.is_empty());
     }
 
     #[test]

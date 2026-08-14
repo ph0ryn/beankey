@@ -31,14 +31,14 @@ pub use post_prediction::{
 };
 pub use session::{
     ConversionResult, ConversionSession, PredictionMode, RequestOptions, SelectionError,
-    TypoCorrectionMode,
+    TypoCorrectionMode, ZenzPredictionError,
 };
 pub use special::{special_candidates, typographical_candidates};
 pub use template::expand_templates;
 pub use text_replacer::{ReplacementCandidate, TextReplacer, TextReplacerError, TextSearchResult};
 pub use zenz::{
     ALIGNMENT_SEPARATOR, AlternativeConstraint, CandidateEvaluation, PrefixConstraint,
-    TokenProbabilityModel, ZenzEvaluationRequest, ZenzInferenceError, ZenzLanguageModel,
-    ZenzPersonalization, ZenzPromptBuilder, ZenzV2Config, ZenzV3Config, ZenzVersionConfig,
-    evaluate_candidate,
+    TokenProbabilityModel, ZenzEvaluationRequest, ZenzInferenceError, ZenzInputGenerationRequest,
+    ZenzLanguageModel, ZenzPersonalization, ZenzPromptBuilder, ZenzV2Config, ZenzV3Config,
+    ZenzVersionConfig, evaluate_candidate, generate_next_input,
 };

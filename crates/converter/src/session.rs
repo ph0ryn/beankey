@@ -10,7 +10,8 @@ use crate::{
     Candidate, ComposingCount, ComposingText, ConversionContext, DictionaryEntry, DictionaryError,
     DictionaryMetadata, InputElement, InputModifier, InputPiece, InputStyle, InputTableRegistry,
     LearningError, LearningMemory, NormalConverter, PostCompositionPrediction,
-    PostCompositionPredictor, PrefixConstraint, UserDictionary,
+    PostCompositionPredictor, PrefixConstraint, UserDictionary, ZenzInferenceError,
+    ZenzInputGenerationRequest, ZenzLanguageModel, ZenzVersionConfig, generate_next_input,
 };
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -131,6 +132,7 @@ pub struct ConversionSession {
     learning_memory: Option<LearningMemory>,
     learned_dictionary: Vec<DictionaryEntry>,
     stable_prediction_cache: Option<StablePredictionCache>,
+    zenz_prediction_cache: Option<ZenzPredictionCache>,
     foreign_completion_provider: Option<Arc<dyn ForeignCompletionProvider>>,
 }
 
@@ -145,6 +147,16 @@ struct PredictiveInputSource {
     base_surface: String,
     possible_nexts: Vec<String>,
     dropped_suffix_count: usize,
+}
+
+#[derive(Clone)]
+struct ZenzPredictionCache {
+    left_context: String,
+    version: ZenzVersionConfig,
+    input_style: InputStyle,
+    original_surface: String,
+    suffix_count: usize,
+    predicted_text: String,
 }
 
 impl ConversionSession {
@@ -376,6 +388,99 @@ impl ConversionSession {
         self.predictions(converter, tables, n_best, &additional)
     }
 
+    pub fn predict_next_input_text(
+        &mut self,
+        tables: &InputTableRegistry,
+        model: &mut dyn ZenzLanguageModel,
+        version: &ZenzVersionConfig,
+        left_context: &str,
+        count: usize,
+        max_entropy: Option<f32>,
+    ) -> Result<(String, usize), ZenzInferenceError> {
+        let input_style = self
+            .composing
+            .input()
+            .last()
+            .map(|element| element.input_style.clone())
+            .unwrap_or(InputStyle::Direct);
+        if let Some(cache) = &self.zenz_prediction_cache
+            && cache.left_context == left_context
+            && cache.version == *version
+            && cache.input_style == input_style
+            && let Some(prediction) = cache.remaining_prediction(&self.composing, count)
+        {
+            return Ok((prediction, 0));
+        }
+
+        let source = predictive_input_source(&self.composing, tables);
+        let predicted_text = generate_next_input(
+            model,
+            ZenzInputGenerationRequest {
+                left_context,
+                composing_text: &source.base_surface,
+                count,
+                min_length: 1,
+                max_entropy,
+                version,
+                possible_nexts: &source.possible_nexts,
+            },
+        )?;
+        self.zenz_prediction_cache = (!predicted_text.is_empty()).then(|| ZenzPredictionCache {
+            left_context: left_context.to_owned(),
+            version: version.clone(),
+            input_style,
+            original_surface: self.composing.surface(),
+            suffix_count: source.dropped_suffix_count,
+            predicted_text: predicted_text.clone(),
+        });
+        Ok((predicted_text, source.dropped_suffix_count))
+    }
+
+    pub fn request_zenz_prediction(
+        &mut self,
+        converter: &NormalConverter<'_>,
+        tables: &InputTableRegistry,
+        model: &mut dyn ZenzLanguageModel,
+        version: &ZenzVersionConfig,
+        left_context: &str,
+    ) -> Result<Vec<Candidate>, ZenzPredictionError> {
+        let additional = self.additional_dictionary();
+        let predictions = self.predictions(converter, tables, 3, &additional)?;
+        if !predictions.is_empty() {
+            return Ok(predictions);
+        }
+        let (predicted_text, suffix_count) =
+            self.predict_next_input_text(tables, model, version, left_context, 10, Some(3.0))?;
+        if predicted_text.is_empty() {
+            return Ok(Vec::new());
+        }
+        let input_style = self
+            .composing
+            .input()
+            .last()
+            .map(|element| element.input_style.clone())
+            .unwrap_or(InputStyle::Direct);
+        let insert_text = if input_style == InputStyle::RomanToKana {
+            to_hiragana(&predicted_text)
+        } else {
+            predicted_text
+        };
+        let mut predicted = self.composing.clone();
+        if suffix_count > 0 {
+            predicted.delete_backward(suffix_count, tables);
+        }
+        predicted.insert_str(&insert_text, input_style, tables);
+        let consumed = self.composing.surface_graphemes().len();
+        Ok(converter
+            .convert_with_entries(&predicted, tables, 1, self.context, &additional)?
+            .into_iter()
+            .map(|mut candidate| {
+                candidate.composing_count = ComposingCount::Surface(consumed);
+                candidate
+            })
+            .collect())
+    }
+
     pub fn request_live_conversion(
         &self,
         converter: &NormalConverter<'_>,
@@ -574,6 +679,8 @@ impl ConversionSession {
         if self.composing.is_empty() {
             self.composing.stop();
             self.context = ConversionContext::default();
+            self.stable_prediction_cache = None;
+            self.zenz_prediction_cache = None;
         }
         Ok(candidate.text)
     }
@@ -594,6 +701,7 @@ impl ConversionSession {
         self.context = ConversionContext::default();
         self.last_committed = None;
         self.stable_prediction_cache = None;
+        self.zenz_prediction_cache = None;
     }
 
     fn predictions(
@@ -694,6 +802,70 @@ impl StablePredictionCache {
     }
 }
 
+impl ZenzPredictionCache {
+    fn remaining_prediction(&self, composing: &ComposingText, count: usize) -> Option<String> {
+        if count == 0 {
+            return None;
+        }
+        let original = UnicodeSegmentation::graphemes(self.original_surface.as_str(), true)
+            .collect::<Vec<_>>();
+        let base = original[..original.len().saturating_sub(self.suffix_count)].concat();
+        let current = composing.surface();
+        let current = current.strip_prefix(&base)?;
+        let predicted_insert = if self.input_style == InputStyle::RomanToKana {
+            to_hiragana(&self.predicted_text)
+        } else {
+            self.predicted_text.clone()
+        };
+        predicted_insert.strip_prefix(current)?;
+        let consumed = UnicodeSegmentation::graphemes(current, true).count();
+        let remaining = UnicodeSegmentation::graphemes(self.predicted_text.as_str(), true)
+            .skip(consumed)
+            .take(count)
+            .collect::<String>();
+        if remaining.is_empty() {
+            return None;
+        }
+        Some(remaining)
+    }
+}
+
+#[derive(Debug)]
+pub enum ZenzPredictionError {
+    Dictionary(DictionaryError),
+    Inference(ZenzInferenceError),
+}
+
+impl fmt::Display for ZenzPredictionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Dictionary(error) => error.fmt(formatter),
+            Self::Inference(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl Error for ZenzPredictionError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Dictionary(error) => Some(error),
+            Self::Inference(error) => Some(error),
+        }
+    }
+}
+
+impl From<DictionaryError> for ZenzPredictionError {
+    fn from(value: DictionaryError) -> Self {
+        Self::Dictionary(value)
+    }
+}
+
+impl From<ZenzInferenceError> for ZenzPredictionError {
+    fn from(value: ZenzInferenceError) -> Self {
+        Self::Inference(value)
+    }
+}
+
 fn predictive_input_source(
     composing: &ComposingText,
     tables: &InputTableRegistry,
@@ -759,6 +931,18 @@ fn to_katakana(value: &str) -> String {
         .map(|character| match character {
             '\u{3041}'..='\u{3096}' => {
                 char::from_u32(u32::from(character) + 96).expect("katakana scalar is valid")
+            }
+            _ => character,
+        })
+        .collect()
+}
+
+fn to_hiragana(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| match character {
+            '\u{30A1}'..='\u{30F6}' => {
+                char::from_u32(u32::from(character) - 96).expect("hiragana scalar is valid")
             }
             _ => character,
         })
