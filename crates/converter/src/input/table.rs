@@ -145,6 +145,25 @@ impl InputTable {
         Self::new(entries)
     }
 
+    pub fn default_kana_jis() -> Self {
+        let mut entries = simple_tsv_entries(include_str!("kana_jis.tsv"));
+        entries.extend([
+            (
+                vec![KeyElement::Piece(InputPiece::CompositionSeparator)],
+                vec![],
+            ),
+            (
+                vec![KeyElement::Piece(InputPiece::Key {
+                    intention: Some("0".into()),
+                    input: "0".into(),
+                    modifiers: BTreeSet::from([InputModifier::Shift]),
+                })],
+                vec![ValueElement::Character("を".into())],
+            ),
+        ]);
+        Self::new(entries)
+    }
+
     pub fn combined(tables: impl IntoIterator<Item = Self>) -> Self {
         Self::new(tables.into_iter().flat_map(|table| {
             table
@@ -402,5 +421,19 @@ mod tests {
         assert_eq!(type_text(&table, "szzz"), "さんざん");
         assert_eq!(type_text(&table, "kz"), "かん");
         assert_eq!(type_text(&table, "ds"), "です");
+    }
+
+    #[test]
+    fn converts_jis_kana_keys_and_shift_zero() {
+        let table = InputTable::default_kana_jis();
+        assert_eq!(type_text(&table, "qwerty"), "たていすかん");
+
+        let shifted_zero = InputPiece::Key {
+            intention: Some("0".into()),
+            input: "0".into(),
+            modifiers: BTreeSet::from([InputModifier::Shift]),
+        };
+        assert_eq!(table.applied("", shifted_zero), "を");
+        assert_eq!(table.applied("", InputPiece::character("0")), "わ");
     }
 }
