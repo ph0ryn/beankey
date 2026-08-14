@@ -8,6 +8,10 @@ impl DictionaryMetadata {
     pub fn contains(self, value: Self) -> bool {
         self.0 & value.0 == value.0
     }
+
+    pub fn insert(&mut self, value: Self) {
+        self.0 |= value.0;
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]

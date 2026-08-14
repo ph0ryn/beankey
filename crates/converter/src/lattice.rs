@@ -318,6 +318,17 @@ impl<'a> NormalConverter<'a> {
         n_best: usize,
         context: ConversionContext,
     ) -> Result<Vec<Candidate>, DictionaryError> {
+        self.convert_with_entries(composing, tables, n_best, context, &[])
+    }
+
+    pub(crate) fn convert_with_entries(
+        &self,
+        composing: &ComposingText,
+        tables: &InputTableRegistry,
+        n_best: usize,
+        context: ConversionContext,
+        additional_entries: &[DictionaryEntry],
+    ) -> Result<Vec<Candidate>, DictionaryError> {
         if n_best == 0 || composing.is_empty() {
             return Ok(Vec::new());
         }
@@ -360,6 +371,34 @@ impl<'a> NormalConverter<'a> {
                     });
                     surface_nodes[start].push(node_index);
                 }
+            }
+            for entry in additional_entries {
+                let ruby_count = UnicodeSegmentation::graphemes(entry.ruby.as_str(), true).count();
+                if ruby_count == 0
+                    || ruby_count > MAXIMUM_DICTIONARY_LENGTH
+                    || ruby_count > surface_count - start
+                    || !suffix.starts_with(&entry.ruby)
+                    || should_remove(entry)
+                {
+                    continue;
+                }
+                let node_index = nodes.len();
+                nodes.push(LatticeNode {
+                    entry: entry.clone(),
+                    range: LatticeRange::Surface {
+                        from: start,
+                        to: start + ruby_count,
+                    },
+                    predecessors: if start == 0 {
+                        vec![Predecessor {
+                            path: None,
+                            total: 0.0,
+                        }]
+                    } else {
+                        Vec::new()
+                    },
+                });
+                surface_nodes[start].push(node_index);
             }
         }
 
@@ -440,6 +479,17 @@ impl<'a> NormalConverter<'a> {
         n_best: usize,
         context: ConversionContext,
     ) -> Result<Vec<Candidate>, DictionaryError> {
+        self.predict_with_entries(composing, tables, n_best, context, &[])
+    }
+
+    pub(crate) fn predict_with_entries(
+        &self,
+        composing: &ComposingText,
+        tables: &InputTableRegistry,
+        n_best: usize,
+        context: ConversionContext,
+        additional_entries: &[DictionaryEntry],
+    ) -> Result<Vec<Candidate>, DictionaryError> {
         if n_best == 0 || composing.is_empty() {
             return Ok(Vec::new());
         }
@@ -497,6 +547,43 @@ impl<'a> NormalConverter<'a> {
                 {
                     continue;
                 }
+                let entry_ruby_count =
+                    UnicodeSegmentation::graphemes(entry.ruby.as_str(), true).count();
+                let penalty = -(entry_ruby_count.saturating_sub(prefix_count) as f32);
+                let meaning = if includes_meaning(&entry) {
+                    self.dictionary
+                        .meaning_cost(
+                            usize::from(context.meaning_id),
+                            usize::from(entry.meaning_id),
+                        )
+                        .unwrap_or(0.0)
+                } else {
+                    0.0
+                };
+                let value = self
+                    .dictionary
+                    .connection_cost(usize::from(context.right_id), usize::from(entry.left_id))?
+                    + entry.value()
+                    + meaning
+                    + penalty;
+                let last_meaning_id = if includes_meaning(&entry) {
+                    entry.meaning_id
+                } else {
+                    context.meaning_id
+                };
+                output.push(Candidate::prediction(
+                    entry.word.clone(),
+                    value,
+                    ComposingCount::Surface(consumed),
+                    last_meaning_id,
+                    vec![entry],
+                ));
+            }
+            for entry in additional_entries
+                .iter()
+                .filter(|entry| entry.ruby.starts_with(&prefix) && entry.ruby != prefix)
+                .cloned()
+            {
                 let entry_ruby_count =
                     UnicodeSegmentation::graphemes(entry.ruby.as_str(), true).count();
                 let penalty = -(entry_ruby_count.saturating_sub(prefix_count) as f32);

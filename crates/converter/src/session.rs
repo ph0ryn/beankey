@@ -2,8 +2,9 @@ use std::error::Error;
 use std::fmt;
 
 use crate::{
-    Candidate, ComposingText, ConversionContext, DictionaryError, InputStyle, InputTableRegistry,
-    NormalConverter, PostCompositionPrediction, PostCompositionPredictor,
+    Candidate, ComposingText, ConversionContext, DictionaryEntry, DictionaryError,
+    DictionaryMetadata, InputStyle, InputTableRegistry, NormalConverter, PostCompositionPrediction,
+    PostCompositionPredictor,
 };
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -71,6 +72,8 @@ pub struct ConversionSession {
     candidates: Vec<Candidate>,
     context: ConversionContext,
     last_committed: Option<Candidate>,
+    user_dictionary: Vec<DictionaryEntry>,
+    user_shortcuts: Vec<DictionaryEntry>,
 }
 
 impl ConversionSession {
@@ -84,6 +87,19 @@ impl ConversionSession {
 
     pub fn candidates(&self) -> &[Candidate] {
         &self.candidates
+    }
+
+    pub fn import_dynamic_user_dictionary(
+        &mut self,
+        mut entries: Vec<DictionaryEntry>,
+        mut shortcuts: Vec<DictionaryEntry>,
+    ) {
+        for entry in entries.iter_mut().chain(shortcuts.iter_mut()) {
+            entry.metadata.insert(DictionaryMetadata::USER_DICTIONARY);
+        }
+        self.user_dictionary = entries;
+        self.user_shortcuts = shortcuts;
+        self.candidates.clear();
     }
 
     pub fn insert_str(
@@ -128,8 +144,13 @@ impl ConversionSession {
         tables: &InputTableRegistry,
         n_best: usize,
     ) -> Result<&[Candidate], DictionaryError> {
-        self.candidates =
-            converter.convert_with_context(&self.composing, tables, n_best, self.context)?;
+        self.candidates = converter.convert_with_entries(
+            &self.composing,
+            tables,
+            n_best,
+            self.context,
+            &self.user_dictionary,
+        )?;
         let mut seen: std::collections::HashSet<_> = self
             .candidates
             .iter()
@@ -158,7 +179,13 @@ impl ConversionSession {
         tables: &InputTableRegistry,
         n_best: usize,
     ) -> Result<Vec<Candidate>, DictionaryError> {
-        converter.predict(&self.composing, tables, n_best, self.context)
+        converter.predict_with_entries(
+            &self.composing,
+            tables,
+            n_best,
+            self.context,
+            &self.user_dictionary,
+        )
     }
 
     pub fn request(
@@ -167,11 +194,12 @@ impl ConversionSession {
         tables: &InputTableRegistry,
         options: RequestOptions,
     ) -> Result<ConversionResult, DictionaryError> {
-        let full = converter.convert_with_context(
+        let full = converter.convert_with_entries(
             &self.composing,
             tables,
             options.n_best,
             self.context,
+            &self.user_dictionary,
         )?;
         let mut first_clauses = unique(
             full.iter()
@@ -189,15 +217,44 @@ impl ConversionSession {
         let predictions = if options.japanese_prediction == PredictionMode::Disabled {
             Vec::new()
         } else {
-            converter.predict(&self.composing, tables, 3, self.context)?
+            converter.predict_with_entries(
+                &self.composing,
+                tables,
+                3,
+                self.context,
+                &self.user_dictionary,
+            )?
         };
         let mut leading: Vec<_> = full.iter().take(5).cloned().collect();
+        let katakana = to_katakana(&self.composing.surface());
+        leading.extend(
+            self.user_shortcuts
+                .iter()
+                .filter(|entry| entry.ruby == katakana)
+                .cloned()
+                .map(|entry| {
+                    Candidate::single(
+                        entry.word.clone(),
+                        entry.value(),
+                        crate::ComposingCount::Surface(
+                            unicode_segmentation::UnicodeSegmentation::graphemes(
+                                katakana.as_str(),
+                                true,
+                            )
+                            .count(),
+                        ),
+                        entry.meaning_id,
+                        vec![entry],
+                    )
+                }),
+        );
+        leading = unique(leading);
         if options.japanese_prediction == PredictionMode::Automatic {
             leading.extend(predictions.iter().cloned());
             leading = unique(leading);
-            leading.sort_by(|left, right| right.value.total_cmp(&left.value));
-            leading.truncate(5);
         }
+        leading.sort_by(|left, right| right.value.total_cmp(&left.value));
+        leading.truncate(5);
 
         let mut seen: std::collections::HashSet<_> = leading
             .iter()
@@ -281,6 +338,18 @@ impl ConversionSession {
         self.context = ConversionContext::default();
         self.last_committed = None;
     }
+}
+
+fn to_katakana(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| match character {
+            '\u{3041}'..='\u{3096}' => {
+                char::from_u32(u32::from(character) + 96).expect("katakana scalar is valid")
+            }
+            _ => character,
+        })
+        .collect()
 }
 
 fn unique(candidates: Vec<Candidate>) -> Vec<Candidate> {
