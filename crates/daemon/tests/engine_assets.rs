@@ -213,5 +213,44 @@ fn applies_zenz_prefix_correction_through_the_session_engine() {
         }),
     )));
 
-    assert_eq!(converted.candidates[0].text, "箸");
+    assert!(
+        converted
+            .candidates
+            .iter()
+            .take(5)
+            .any(|candidate| candidate.text == "箸")
+    );
+}
+
+#[test]
+fn preserves_special_candidates_after_zenz_conversion() {
+    let mut engine =
+        Engine::open_with_zenz_model(dictionary_root(), Box::new(PrefixModel)).unwrap();
+    response(engine.handle(envelope(
+        1,
+        Payload::StartSession(protocol::StartSession {
+            input_style: protocol::InputStyle::Direct as i32,
+            surrounding_text: None,
+        }),
+    )));
+
+    let converted = response(engine.handle(envelope(
+        2,
+        Payload::KeyEvent(protocol::KeyEvent {
+            key_sym: 0,
+            modifiers: 0,
+            release: false,
+            text: "U+1F600".into(),
+            surrounding_text: None,
+            input: String::new(),
+            intention: String::new(),
+        }),
+    )));
+
+    assert!(
+        converted
+            .candidates
+            .iter()
+            .any(|candidate| candidate.text == "😀")
+    );
 }

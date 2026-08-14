@@ -454,6 +454,15 @@ impl Engine {
                     format!("Zenz candidate generation failed: {error}"),
                 )
             })?;
+            session
+                .conversion
+                .finalize_zenz_request(&converter, &self.tables, RequestOptions::default())
+                .map_err(|error| {
+                    (
+                        Code::Internal,
+                        format!("candidate assembly failed: {error}"),
+                    )
+                })?;
         } else {
             session
                 .conversion

@@ -378,6 +378,25 @@ impl ConversionSession {
         self.candidates = candidates;
     }
 
+    pub fn finalize_zenz_request(
+        &mut self,
+        converter: &NormalConverter<'_>,
+        tables: &InputTableRegistry,
+        options: RequestOptions,
+    ) -> Result<ConversionResult, DictionaryError> {
+        let mut full = std::mem::take(&mut self.candidates);
+        let mut leading_values = full
+            .iter()
+            .take(5)
+            .map(|candidate| candidate.value)
+            .collect::<Vec<_>>();
+        leading_values.sort_by(|left, right| right.total_cmp(left));
+        for (candidate, value) in full.iter_mut().take(5).zip(leading_values) {
+            candidate.value = value;
+        }
+        self.assemble_request(converter, tables, options, full)
+    }
+
     pub fn request_predictions(
         &mut self,
         converter: &NormalConverter<'_>,
@@ -509,6 +528,17 @@ impl ConversionSession {
             &additional,
             options.typo_correction == TypoCorrectionMode::Enabled,
         )?;
+        self.assemble_request(converter, tables, options, full)
+    }
+
+    fn assemble_request(
+        &mut self,
+        converter: &NormalConverter<'_>,
+        tables: &InputTableRegistry,
+        options: RequestOptions,
+        full: Vec<Candidate>,
+    ) -> Result<ConversionResult, DictionaryError> {
+        let additional = self.additional_dictionary();
         let mut first_clauses = unique(
             full.iter()
                 .filter_map(Candidate::first_clause_candidate)
