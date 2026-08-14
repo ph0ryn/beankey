@@ -3,7 +3,7 @@ use std::fmt;
 
 use crate::{
     Candidate, ComposingText, ConversionContext, DictionaryError, InputStyle, InputTableRegistry,
-    NormalConverter,
+    NormalConverter, PostCompositionPrediction, PostCompositionPredictor,
 };
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -70,6 +70,7 @@ pub struct ConversionSession {
     composing: ComposingText,
     candidates: Vec<Candidate>,
     context: ConversionContext,
+    last_committed: Option<Candidate>,
 }
 
 impl ConversionSession {
@@ -93,11 +94,13 @@ impl ConversionSession {
     ) {
         self.composing.insert_str(value, input_style, tables);
         self.candidates.clear();
+        self.last_committed = None;
     }
 
     pub fn delete_backward(&mut self, count: usize, tables: &InputTableRegistry) {
         self.composing.delete_backward(count, tables);
         self.candidates.clear();
+        self.last_committed = None;
         if self.composing.is_empty() {
             self.context = ConversionContext::default();
         }
@@ -106,6 +109,7 @@ impl ConversionSession {
     pub fn delete_forward(&mut self, count: usize, tables: &InputTableRegistry) {
         self.composing.delete_forward(count, tables);
         self.candidates.clear();
+        self.last_committed = None;
         if self.composing.is_empty() {
             self.context = ConversionContext::default();
         }
@@ -114,6 +118,7 @@ impl ConversionSession {
     pub fn move_cursor(&mut self, count: isize) -> isize {
         let moved = self.composing.move_cursor(count);
         self.candidates.clear();
+        self.last_committed = None;
         moved
     }
 
@@ -244,7 +249,7 @@ impl ConversionSession {
                     candidate_count: self.candidates.len(),
                 })?;
         self.composing
-            .complete_prefix(candidate.composing_count, tables);
+            .complete_prefix(candidate.composing_count.clone(), tables);
         if let Some(last) = candidate.entries.last() {
             self.context = ConversionContext {
                 right_id: last.right_id,
@@ -252,6 +257,7 @@ impl ConversionSession {
             };
         }
         self.candidates.clear();
+        self.last_committed = Some(candidate.clone());
         if self.composing.is_empty() {
             self.composing.stop();
             self.context = ConversionContext::default();
@@ -259,10 +265,21 @@ impl ConversionSession {
         Ok(candidate.text)
     }
 
+    pub fn request_post_composition_predictions(
+        &self,
+        predictor: &PostCompositionPredictor<'_>,
+    ) -> Result<Vec<PostCompositionPrediction>, DictionaryError> {
+        match &self.last_committed {
+            Some(candidate) => predictor.predict(candidate),
+            None => Ok(Vec::new()),
+        }
+    }
+
     pub fn reset(&mut self) {
         self.composing.stop();
         self.candidates.clear();
         self.context = ConversionContext::default();
+        self.last_committed = None;
     }
 }
 

@@ -1,6 +1,7 @@
 mod dictionary;
 mod input;
 mod lattice;
+mod post_prediction;
 mod session;
 
 pub use dictionary::{
@@ -14,6 +15,9 @@ pub use input::{
     InputTableExportError, InputTableId, InputTableRegistry, KeyElement, ValueElement,
 };
 pub use lattice::{Candidate, ConversionContext, LatticeRange, NormalConverter};
+pub use post_prediction::{
+    PostCompositionPrediction, PostCompositionPredictor, PostPredictionKind,
+};
 pub use session::{
     ConversionResult, ConversionSession, PredictionMode, RequestOptions, SelectionError,
 };

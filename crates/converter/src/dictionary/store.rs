@@ -189,6 +189,19 @@ impl DictionaryStore {
         self.meaning_matrix.get(former, latter)
     }
 
+    pub fn zero_hint_entries(
+        &self,
+        right_id: u16,
+    ) -> Result<Vec<DictionaryEntry>, DictionaryError> {
+        let path = self.root.join(format!("p/pc_{right_id}.csv"));
+        let content = match fs::read_to_string(&path) {
+            Ok(content) => content,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(source) => return Err(DictionaryError::Io { path, source }),
+        };
+        Ok(content.lines().map(parse_prediction_entry).collect())
+    }
+
     fn lookup_key<'a>(&self, ruby: &'a str) -> Option<(&'a str, Vec<u8>)> {
         let identifier = UnicodeSegmentation::graphemes(ruby, true).next()?;
         Some((identifier, self.character_ids.encode(ruby)?))
@@ -246,6 +259,41 @@ impl DictionaryStore {
         name: &'static str,
     ) -> Result<MutexGuard<'a, T>, DictionaryError> {
         mutex.lock().map_err(|_| DictionaryError::Poisoned(name))
+    }
+}
+
+fn parse_prediction_entry(line: &str) -> DictionaryEntry {
+    let mut fields = line.split(',');
+    let ruby = fields.next().unwrap_or_default().to_owned();
+    let word = match fields.next().unwrap_or_default() {
+        "" => ruby.clone(),
+        word => word.to_owned(),
+    };
+    let left_id = fields
+        .next()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0);
+    let right_id = fields
+        .next()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(left_id);
+    let meaning_id = fields
+        .next()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0);
+    let base_value = fields
+        .next()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(-30.0);
+    DictionaryEntry {
+        word,
+        ruby,
+        left_id,
+        right_id,
+        meaning_id,
+        base_value,
+        adjustment: 0.0,
+        metadata: Default::default(),
     }
 }
 

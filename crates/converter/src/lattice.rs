@@ -241,7 +241,7 @@ impl Candidate {
         Self::single(text, value, composing_count, last_meaning_id, entries)
     }
 
-    fn single(
+    pub(crate) fn single(
         text: String,
         value: f32,
         composing_count: ComposingCount,
@@ -803,7 +803,7 @@ fn is_clause(former: usize, latter: usize) -> bool {
     matches!(latter_type, 0 | 1) && former_type != 0
 }
 
-fn includes_meaning(entry: &DictionaryEntry) -> bool {
+pub(crate) fn includes_meaning(entry: &DictionaryEntry) -> bool {
     let left = usize::from(entry.left_id);
     let right = usize::from(entry.right_id);
     (895..=1280).contains(&left)
@@ -812,6 +812,12 @@ fn includes_meaning(entry: &DictionaryEntry) -> bool {
         || (1297..=1305).contains(&right)
         || word_type(left) == 1
         || word_type(right) == 1
+}
+
+pub(crate) fn prediction_usable(right_id: u16) -> bool {
+    PREDICTION_UNUSABLE_RIGHT_IDS
+        .binary_search(&right_id)
+        .is_err()
 }
 
 fn to_katakana(value: &str) -> String {
