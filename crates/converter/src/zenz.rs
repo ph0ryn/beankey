@@ -1,4 +1,9 @@
+use std::error::Error;
+use std::fmt;
+
 use unicode_segmentation::UnicodeSegmentation;
+
+use crate::{Candidate, DictionaryMetadata};
 
 const INPUT_TAG: char = '\u{EE00}';
 const OUTPUT_TAG: char = '\u{EE01}';
@@ -224,6 +229,261 @@ impl ZenzPromptBuilder {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ZenzInferenceError(pub String);
+
+impl fmt::Display for ZenzInferenceError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl Error for ZenzInferenceError {}
+
+pub trait ZenzLanguageModel {
+    fn vocabulary_size(&self) -> usize;
+    fn eos_token(&self) -> i32;
+    fn tokenize(&mut self, text: &str, add_special: bool) -> Result<Vec<i32>, ZenzInferenceError>;
+    fn token_to_piece(&mut self, token: i32) -> Result<Vec<u8>, ZenzInferenceError>;
+    fn next_logits(&mut self, tokens: &[i32]) -> Result<Vec<f32>, ZenzInferenceError>;
+}
+
+pub trait TokenProbabilityModel {
+    fn probabilities(&self, prefix: &[i32], vocabulary_size: usize) -> Option<Vec<f32>>;
+}
+
+pub struct ZenzPersonalization<'a> {
+    pub alpha: f32,
+    pub base: &'a dyn TokenProbabilityModel,
+    pub personal: &'a dyn TokenProbabilityModel,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct AlternativeConstraint {
+    pub probability_ratio: f32,
+    pub bytes: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum CandidateEvaluation {
+    Pass {
+        score: f32,
+        alternatives: Vec<AlternativeConstraint>,
+    },
+    FixRequired(Vec<u8>),
+    WholeResult(String),
+}
+
+pub struct ZenzEvaluationRequest<'a> {
+    pub input: &'a str,
+    pub input_cursor_position: Option<usize>,
+    pub candidate: &'a Candidate,
+    pub request_rich_candidates: bool,
+    pub prefix_constraint: &'a PrefixConstraint,
+    pub personalization: Option<ZenzPersonalization<'a>>,
+    pub version: &'a ZenzVersionConfig,
+}
+
+pub fn evaluate_candidate(
+    model: &mut dyn ZenzLanguageModel,
+    request: ZenzEvaluationRequest<'_>,
+) -> Result<CandidateEvaluation, ZenzInferenceError> {
+    let user_dictionary_prompt = request
+        .candidate
+        .entries
+        .iter()
+        .filter(|entry| entry.metadata.contains(DictionaryMetadata::USER_DICTIONARY))
+        .map(|entry| format!("{}({})", entry.word, to_hiragana(&entry.ruby)))
+        .collect::<String>();
+    let prompt = ZenzPromptBuilder::candidate_evaluation(
+        request.input,
+        request.input_cursor_position,
+        &user_dictionary_prompt,
+        request.version,
+    );
+    let prompt = normalize_for_model(&prompt);
+    let candidate_text = ZenzPromptBuilder::candidate_text_for_evaluation(
+        &request.candidate.text,
+        request.input,
+        request.input_cursor_position,
+        request.version,
+    );
+    let mut prompt_tokens = model.tokenize(&prompt, true)?;
+    let candidate_tokens = model.tokenize(&candidate_text, false)?;
+    let learned_priorities = learned_token_priorities(model, request.candidate, &candidate_tokens)?;
+    let vocabulary_size = model.vocabulary_size();
+    let mut candidate_prefix = Vec::new();
+    let mut score = 0.0;
+    let mut alternatives = Vec::new();
+
+    for (candidate_index, &candidate_token) in candidate_tokens.iter().enumerate() {
+        let logits = model.next_logits(&prompt_tokens)?;
+        if logits.len() != vocabulary_size || logits.is_empty() {
+            return Err(ZenzInferenceError(format!(
+                "model returned {} logits for a vocabulary of {vocabulary_size}",
+                logits.len()
+            )));
+        }
+        let personalized = personalized_logits(
+            logits,
+            &candidate_tokens[..candidate_index],
+            request.personalization.as_ref(),
+        );
+        let maximum_token = strict_argmax(&personalized);
+        let maximum_logit = personalized[maximum_token];
+        let candidate_token_index = usize::try_from(candidate_token)
+            .ok()
+            .filter(|&token| token < vocabulary_size)
+            .ok_or_else(|| {
+                ZenzInferenceError(format!("invalid candidate token {candidate_token}"))
+            })?;
+
+        if maximum_token != candidate_token_index {
+            if i32::try_from(maximum_token).ok() == Some(model.eos_token()) {
+                return Ok(CandidateEvaluation::WholeResult(
+                    String::from_utf8(candidate_prefix).unwrap_or_default(),
+                ));
+            }
+            let learned_priority = learned_priorities
+                .get(candidate_index)
+                .copied()
+                .unwrap_or_default();
+            if learned_priority == 0.0
+                || personalized[candidate_token_index] + learned_priority <= maximum_logit
+            {
+                candidate_prefix.extend(
+                    model.token_to_piece(
+                        i32::try_from(maximum_token)
+                            .map_err(|_| ZenzInferenceError("vocabulary exceeds i32".into()))?,
+                    )?,
+                );
+                return Ok(CandidateEvaluation::FixRequired(candidate_prefix));
+            }
+        }
+
+        if request.request_rich_candidates {
+            let mut top_tokens: Vec<_> = personalized.iter().copied().enumerate().collect();
+            top_tokens.sort_by(|left, right| {
+                right
+                    .1
+                    .total_cmp(&left.1)
+                    .then_with(|| left.0.cmp(&right.0))
+            });
+            for (token, logit) in top_tokens.into_iter().take(3) {
+                if token == maximum_token {
+                    continue;
+                }
+                let mut bytes = candidate_prefix.clone();
+                bytes.extend(
+                    model.token_to_piece(
+                        i32::try_from(token)
+                            .map_err(|_| ZenzInferenceError("vocabulary exceeds i32".into()))?,
+                    )?,
+                );
+                alternatives.push(AlternativeConstraint {
+                    probability_ratio: (logit - maximum_logit).exp(),
+                    bytes,
+                });
+            }
+        }
+        score += maximum_logit;
+        candidate_prefix.extend(model.token_to_piece(candidate_token)?);
+        prompt_tokens.push(candidate_token);
+    }
+
+    alternatives.sort_by(|left, right| right.probability_ratio.total_cmp(&left.probability_ratio));
+    alternatives.truncate(5);
+    Ok(CandidateEvaluation::Pass {
+        score,
+        alternatives,
+    })
+}
+
+fn personalized_logits(
+    logits: Vec<f32>,
+    candidate_prefix: &[i32],
+    personalization: Option<&ZenzPersonalization<'_>>,
+) -> Vec<f32> {
+    let Some(personalization) = personalization.filter(|mode| mode.alpha > 0.0) else {
+        return logits;
+    };
+    if candidate_prefix.is_empty() {
+        return logits;
+    }
+    let Some(base) = personalization
+        .base
+        .probabilities(candidate_prefix, logits.len())
+    else {
+        return logits;
+    };
+    let Some(personal) = personalization
+        .personal
+        .probabilities(candidate_prefix, logits.len())
+    else {
+        return logits;
+    };
+    if base.len() != logits.len() || personal.len() != logits.len() {
+        return logits;
+    }
+    logits
+        .into_iter()
+        .zip(base.into_iter().zip(personal))
+        .map(|(logit, (base, personal))| {
+            logit + personalization.alpha * ((personal + 1e-7).ln() - (base + 1e-7).ln())
+        })
+        .collect()
+}
+
+fn learned_token_priorities(
+    model: &mut dyn ZenzLanguageModel,
+    candidate: &Candidate,
+    candidate_tokens: &[i32],
+) -> Result<Vec<f32>, ZenzInferenceError> {
+    if !candidate
+        .entries
+        .iter()
+        .any(|entry| entry.metadata.contains(DictionaryMetadata::LEARNED))
+    {
+        return Ok(Vec::new());
+    }
+    let mut priorities = Vec::new();
+    for entry in &candidate.entries {
+        let token_count = model.tokenize(&entry.word, false)?.len();
+        let priority = if entry.metadata.contains(DictionaryMetadata::LEARNED) {
+            learning_priority(&entry.ruby).ln()
+        } else {
+            0.0
+        };
+        priorities.extend(std::iter::repeat_n(priority, token_count));
+    }
+    priorities.resize(candidate_tokens.len(), 0.0);
+    priorities.truncate(candidate_tokens.len());
+    Ok(priorities)
+}
+
+fn learning_priority(ruby: &str) -> f32 {
+    let count = UnicodeSegmentation::graphemes(ruby, true).count();
+    match count {
+        1..=4 => (count + 2) as f32,
+        5..=15 => (count * 2) as f32,
+        _ => 30.0,
+    }
+}
+
+fn strict_argmax(logits: &[f32]) -> usize {
+    let mut maximum = 0;
+    for index in 1..logits.len() {
+        if logits[index] > logits[maximum] {
+            maximum = index;
+        }
+    }
+    maximum
+}
+
+fn normalize_for_model(value: &str) -> String {
+    value.replace(' ', "\u{3000}").replace(['\n', '\r'], "")
+}
+
 fn v3_conditions(config: &ZenzV3Config) -> Vec<String> {
     [
         (PROFILE_TAG, config.profile.as_deref()),
@@ -281,9 +541,111 @@ fn to_katakana(value: &str) -> String {
         .collect()
 }
 
+fn to_hiragana(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| match character {
+            '\u{30A1}'..='\u{30F6}' => {
+                char::from_u32(u32::from(character) - 96).expect("hiragana scalar is valid")
+            }
+            _ => character,
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{ComposingCount, DictionaryEntry};
+
+    enum Script {
+        Pass,
+        Fix,
+        Eos,
+    }
+
+    struct ScriptedModel {
+        script: Script,
+    }
+
+    impl ZenzLanguageModel for ScriptedModel {
+        fn vocabulary_size(&self) -> usize {
+            6
+        }
+
+        fn eos_token(&self) -> i32 {
+            2
+        }
+
+        fn tokenize(
+            &mut self,
+            text: &str,
+            _add_special: bool,
+        ) -> Result<Vec<i32>, ZenzInferenceError> {
+            Ok(if text == "ab" { vec![3, 4] } else { vec![1] })
+        }
+
+        fn token_to_piece(&mut self, token: i32) -> Result<Vec<u8>, ZenzInferenceError> {
+            Ok(match token {
+                3 => b"a".to_vec(),
+                4 => b"b".to_vec(),
+                5 => b"x".to_vec(),
+                _ => Vec::new(),
+            })
+        }
+
+        fn next_logits(&mut self, tokens: &[i32]) -> Result<Vec<f32>, ZenzInferenceError> {
+            let desired = if tokens == [1] {
+                match self.script {
+                    Script::Pass => 3,
+                    Script::Fix => 5,
+                    Script::Eos => 2,
+                }
+            } else {
+                4
+            };
+            let mut logits = vec![-10.0; 6];
+            logits[desired] = 2.0;
+            Ok(logits)
+        }
+    }
+
+    fn evaluation_candidate() -> Candidate {
+        Candidate::single(
+            "ab".into(),
+            -1.0,
+            ComposingCount::Surface(1),
+            500,
+            vec![DictionaryEntry {
+                word: "ab".into(),
+                ruby: "エービー".into(),
+                left_id: 0,
+                right_id: 0,
+                meaning_id: 500,
+                base_value: -1.0,
+                adjustment: 0.0,
+                metadata: DictionaryMetadata::default(),
+            }],
+        )
+    }
+
+    fn evaluate_script(script: Script) -> CandidateEvaluation {
+        let mut model = ScriptedModel { script };
+        let candidate = evaluation_candidate();
+        evaluate_candidate(
+            &mut model,
+            ZenzEvaluationRequest {
+                input: "エービー",
+                input_cursor_position: None,
+                candidate: &candidate,
+                request_rich_candidates: false,
+                prefix_constraint: &PrefixConstraint::default(),
+                personalization: None,
+                version: &ZenzVersionConfig::default(),
+            },
+        )
+        .unwrap()
+    }
 
     #[test]
     fn builds_v3_input_prediction_prompt() {
@@ -361,5 +723,32 @@ mod tests {
         assert_eq!(constraint.bytes, "橋".as_bytes());
         assert!(constraint.has_eos);
         assert!(constraint.ignore_memory_and_user_dictionary);
+    }
+
+    #[test]
+    fn evaluates_candidate_tokens_until_they_pass() {
+        assert_eq!(
+            evaluate_script(Script::Pass),
+            CandidateEvaluation::Pass {
+                score: 4.0,
+                alternatives: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn returns_the_model_selected_utf8_prefix() {
+        assert_eq!(
+            evaluate_script(Script::Fix),
+            CandidateEvaluation::FixRequired(b"x".to_vec())
+        );
+    }
+
+    #[test]
+    fn turns_eos_into_a_whole_result() {
+        assert_eq!(
+            evaluate_script(Script::Eos),
+            CandidateEvaluation::WholeResult(String::new())
+        );
     }
 }
