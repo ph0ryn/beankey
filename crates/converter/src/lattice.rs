@@ -434,6 +434,28 @@ impl<'a> NormalConverter<'a> {
         )
     }
 
+    pub(crate) fn convert_with_entries_and_prefix_constraint(
+        &self,
+        composing: &ComposingText,
+        tables: &InputTableRegistry,
+        n_best: usize,
+        context: ConversionContext,
+        additional_entries: &[DictionaryEntry],
+        constraint: &PrefixConstraint,
+    ) -> Result<Vec<Candidate>, DictionaryError> {
+        self.convert_with_entries_typo_and_constraint(
+            composing,
+            tables,
+            n_best,
+            context,
+            ConversionModifiers {
+                additional_entries,
+                need_typo_correction: false,
+                constraint: Some(constraint),
+            },
+        )
+    }
+
     fn convert_with_entries_typo_and_constraint(
         &self,
         composing: &ComposingText,

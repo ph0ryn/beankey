@@ -5,6 +5,7 @@ use std::io::{self, Read, Write};
 use prost::Message;
 
 mod engine;
+mod zenz;
 
 pub const PROTOCOL_VERSION: u32 = 1;
 pub const MAXIMUM_MESSAGE_SIZE: usize = 1024 * 1024;
@@ -13,7 +14,8 @@ pub mod protocol {
     include!(concat!(env!("OUT_DIR"), "/beankey.v1.rs"));
 }
 
-pub use engine::Engine;
+pub use engine::{Engine, EngineOpenError};
+pub use zenz::{DEFAULT_INFERENCE_LIMIT, LlamaModel, ZenzConversionError};
 
 #[derive(Debug)]
 pub enum FrameError {

@@ -10,7 +10,7 @@ use crate::{
     Candidate, ComposingCount, ComposingText, ConversionContext, DictionaryEntry, DictionaryError,
     DictionaryMetadata, InputElement, InputModifier, InputPiece, InputStyle, InputTableRegistry,
     LearningError, LearningMemory, NormalConverter, PostCompositionPrediction,
-    PostCompositionPredictor, UserDictionary,
+    PostCompositionPredictor, PrefixConstraint, UserDictionary,
 };
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -331,6 +331,39 @@ impl ConversionSession {
         first_clauses.truncate(5);
         self.candidates.extend(first_clauses);
         Ok(&self.candidates)
+    }
+
+    pub fn request_zenz_draft(
+        &mut self,
+        converter: &NormalConverter<'_>,
+        tables: &InputTableRegistry,
+        n_best: usize,
+        constraint: &PrefixConstraint,
+    ) -> Result<&[Candidate], DictionaryError> {
+        let additional = self.additional_dictionary();
+        self.candidates = if constraint.is_empty() {
+            converter.convert_with_entries(
+                &self.composing,
+                tables,
+                n_best,
+                self.context,
+                &additional,
+            )?
+        } else {
+            converter.convert_with_entries_and_prefix_constraint(
+                &self.composing,
+                tables,
+                n_best,
+                self.context,
+                &additional,
+                constraint,
+            )?
+        };
+        Ok(&self.candidates)
+    }
+
+    pub fn set_zenz_candidates(&mut self, candidates: Vec<Candidate>) {
+        self.candidates = candidates;
     }
 
     pub fn request_predictions(

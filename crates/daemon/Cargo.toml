@@ -7,6 +7,7 @@ rust-version.workspace = true
 
 [dependencies]
 beankey-converter = { path = "../converter" }
+beankey-llama = { path = "../llama" }
 prost.workspace = true
 
 [build-dependencies]

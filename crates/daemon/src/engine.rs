@@ -1,16 +1,20 @@
 use std::collections::HashMap;
+use std::error::Error;
+use std::fmt;
 use std::path::Path;
 
 use beankey_converter::{
     CompleteAction, ComposingCount as ConverterComposingCount, ConversionSession, DictionaryError,
     DictionaryStore, InputModifier, InputStyle as ConverterInputStyle, InputTableId,
-    InputTableRegistry, NormalConverter, RequestOptions,
+    InputTableRegistry, NormalConverter, RequestOptions, ZenzLanguageModel, ZenzVersionConfig,
 };
+use beankey_llama::LlamaError;
 
 use crate::protocol::composing_count::Count;
 use crate::protocol::envelope::Payload;
 use crate::protocol::protocol_error::Code;
-use crate::{PROTOCOL_VERSION, protocol};
+use crate::zenz;
+use crate::{LlamaModel, PROTOCOL_VERSION, protocol};
 
 const KEY_BACKSPACE: u32 = 0xff08;
 const KEY_RETURN: u32 = 0xff0d;
@@ -34,6 +38,46 @@ pub struct Engine {
     dictionary: DictionaryStore,
     tables: InputTableRegistry,
     sessions: HashMap<String, SessionState>,
+    zenz_model: Option<Box<dyn ZenzLanguageModel>>,
+    zenz_version: ZenzVersionConfig,
+    zenz_rich_candidates: bool,
+    zenz_inference_limit: usize,
+}
+
+#[derive(Debug)]
+pub enum EngineOpenError {
+    Dictionary(DictionaryError),
+    Llama(LlamaError),
+}
+
+impl fmt::Display for EngineOpenError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Dictionary(error) => error.fmt(formatter),
+            Self::Llama(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl Error for EngineOpenError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Dictionary(error) => Some(error),
+            Self::Llama(error) => Some(error),
+        }
+    }
+}
+
+impl From<DictionaryError> for EngineOpenError {
+    fn from(value: DictionaryError) -> Self {
+        Self::Dictionary(value)
+    }
+}
+
+impl From<LlamaError> for EngineOpenError {
+    fn from(value: LlamaError) -> Self {
+        Self::Llama(value)
+    }
 }
 
 impl Engine {
@@ -42,7 +86,31 @@ impl Engine {
             dictionary: DictionaryStore::open(dictionary_path.as_ref().to_path_buf())?,
             tables: InputTableRegistry::new(),
             sessions: HashMap::new(),
+            zenz_model: None,
+            zenz_version: ZenzVersionConfig::default(),
+            zenz_rich_candidates: false,
+            zenz_inference_limit: zenz::DEFAULT_INFERENCE_LIMIT,
         })
+    }
+
+    pub fn open_with_zenz_model(
+        dictionary_path: impl AsRef<Path>,
+        model: Box<dyn ZenzLanguageModel>,
+    ) -> Result<Self, DictionaryError> {
+        let mut engine = Self::open(dictionary_path)?;
+        engine.zenz_model = Some(model);
+        Ok(engine)
+    }
+
+    pub fn open_with_llama(
+        dictionary_path: impl AsRef<Path>,
+        model_path: impl AsRef<Path>,
+        backend_directory: impl AsRef<Path>,
+    ) -> Result<Self, EngineOpenError> {
+        Ok(Self::open_with_zenz_model(
+            dictionary_path,
+            Box::new(LlamaModel::load(model_path, backend_directory)?),
+        )?)
     }
 
     pub fn handle(&mut self, envelope: protocol::Envelope) -> protocol::Envelope {
@@ -184,7 +252,7 @@ impl Engine {
             Payload::StartSession(_)
             | Payload::EndSession(_)
             | Payload::StateResponse(_)
-            | Payload::ProtocolError(_) => Err("invalid session request"),
+            | Payload::ProtocolError(_) => Err("invalid session request".into()),
         };
         self.sessions.insert(session_id.clone(), session);
         match response {
@@ -200,10 +268,10 @@ impl Engine {
     }
 
     fn handle_key(
-        &self,
+        &mut self,
         session: &mut SessionState,
         event: protocol::KeyEvent,
-    ) -> Result<protocol::StateResponse, &'static str> {
+    ) -> Result<protocol::StateResponse, String> {
         if event.release {
             return Ok(make_state(session, false, String::new(), false));
         }
@@ -290,31 +358,23 @@ impl Engine {
 
         session.selected_candidate = 0;
         if !session.conversion.composing().is_empty() {
-            let converter = NormalConverter::new(&self.dictionary);
-            session
-                .conversion
-                .request(&converter, &self.tables, RequestOptions::default())
-                .map_err(|_| "candidate generation failed")?;
+            self.request_candidates(session)?;
         }
         Ok(make_state(session, true, String::new(), false))
     }
 
     fn select_candidate(
-        &self,
+        &mut self,
         session: &mut SessionState,
         index: usize,
-    ) -> Result<protocol::StateResponse, &'static str> {
+    ) -> Result<protocol::StateResponse, String> {
         let commit = session
             .conversion
             .select_candidate(index, &self.tables)
-            .map_err(|_| "candidate selection failed")?;
+            .map_err(|error| format!("candidate selection failed: {error}"))?;
         session.selected_candidate = 0;
         if !session.conversion.composing().is_empty() {
-            let converter = NormalConverter::new(&self.dictionary);
-            session
-                .conversion
-                .request(&converter, &self.tables, RequestOptions::default())
-                .map_err(|_| "candidate generation failed")?;
+            self.request_candidates(session)?;
         }
         Ok(make_state(
             session,
@@ -322,6 +382,28 @@ impl Engine {
             commit,
             session.conversion.composing().is_empty(),
         ))
+    }
+
+    fn request_candidates(&mut self, session: &mut SessionState) -> Result<(), String> {
+        let converter = NormalConverter::new(&self.dictionary);
+        if let Some(model) = self.zenz_model.as_deref_mut() {
+            zenz::convert(
+                &mut session.conversion,
+                &converter,
+                &self.tables,
+                model,
+                &self.zenz_version,
+                self.zenz_rich_candidates,
+                self.zenz_inference_limit,
+            )
+            .map_err(|error| format!("Zenz candidate generation failed: {error}"))?;
+        } else {
+            session
+                .conversion
+                .request(&converter, &self.tables, RequestOptions::default())
+                .map_err(|error| format!("candidate generation failed: {error}"))?;
+        }
+        Ok(())
     }
 }
 

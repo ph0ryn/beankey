@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use beankey_converter::{ZenzInferenceError, ZenzLanguageModel};
 use beankey_daemon::protocol::envelope::Payload;
 use beankey_daemon::{Engine, PROTOCOL_VERSION, protocol};
 
@@ -126,4 +127,66 @@ fn isolates_sessions_and_rejects_out_of_order_requests() {
     );
     other.session_id = "other".into();
     response(engine.handle(other));
+}
+
+struct PrefixModel;
+
+impl ZenzLanguageModel for PrefixModel {
+    fn vocabulary_size(&self) -> usize {
+        5
+    }
+
+    fn eos_token(&self) -> i32 {
+        2
+    }
+
+    fn tokenize(&mut self, text: &str, add_special: bool) -> Result<Vec<i32>, ZenzInferenceError> {
+        Ok(if add_special {
+            vec![1]
+        } else if text == "箸" {
+            vec![4]
+        } else {
+            vec![3]
+        })
+    }
+
+    fn token_to_piece(&mut self, token: i32) -> Result<Vec<u8>, ZenzInferenceError> {
+        Ok(if token == 4 {
+            "箸".as_bytes().to_vec()
+        } else {
+            b"x".to_vec()
+        })
+    }
+
+    fn next_logits(&mut self, _tokens: &[i32]) -> Result<Vec<f32>, ZenzInferenceError> {
+        Ok(vec![0.0, 0.0, 0.0, 1.0, 10.0])
+    }
+}
+
+#[test]
+fn applies_zenz_prefix_correction_through_the_session_engine() {
+    let mut engine =
+        Engine::open_with_zenz_model(dictionary_root(), Box::new(PrefixModel)).unwrap();
+    response(engine.handle(envelope(
+        1,
+        Payload::StartSession(protocol::StartSession {
+            input_style: protocol::InputStyle::Direct as i32,
+            surrounding_text: None,
+        }),
+    )));
+
+    let converted = response(engine.handle(envelope(
+        2,
+        Payload::KeyEvent(protocol::KeyEvent {
+            key_sym: 0,
+            modifiers: 0,
+            release: false,
+            text: "はし".into(),
+            surrounding_text: None,
+            input: String::new(),
+            intention: String::new(),
+        }),
+    )));
+
+    assert_eq!(converted.candidates[0].text, "箸");
 }

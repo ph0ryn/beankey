@@ -51,6 +51,7 @@ name = "beankey-daemon"
 version = "0.1.0"
 dependencies = [
  "beankey-converter",
+ "beankey-llama",
  "prost",
  "prost-build",
 ]
