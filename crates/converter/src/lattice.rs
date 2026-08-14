@@ -608,6 +608,31 @@ impl<'a> NormalConverter<'a> {
         if n_best == 0 || composing.is_empty() {
             return Ok(Vec::new());
         }
+        let converted =
+            self.convert_with_entries(composing, tables, 1, context, additional_entries)?;
+        if let Some(candidate) = converted.first() {
+            let predictions = self.predict_from_candidate(
+                composing,
+                candidate,
+                n_best,
+                context,
+                additional_entries,
+            )?;
+            if !predictions.is_empty() {
+                return Ok(predictions);
+            }
+        }
+        self.predict_whole_input(composing, tables, n_best, context, additional_entries)
+    }
+
+    fn predict_whole_input(
+        &self,
+        composing: &ComposingText,
+        tables: &InputTableRegistry,
+        n_best: usize,
+        context: ConversionContext,
+        additional_entries: &[DictionaryEntry],
+    ) -> Result<Vec<Candidate>, DictionaryError> {
         let input_style = composing
             .input()
             .last()
@@ -643,92 +668,145 @@ impl<'a> NormalConverter<'a> {
                     .unwrap_or_default()
             }
         };
-        let consumed = UnicodeSegmentation::graphemes(surface.as_str(), true).count();
+        self.predict_for_ruby_prefixes(
+            &prefixes,
+            &[],
+            UnicodeSegmentation::graphemes(surface.as_str(), true).count(),
+            n_best,
+            context,
+            additional_entries,
+        )
+    }
+
+    fn predict_from_candidate(
+        &self,
+        composing: &ComposingText,
+        candidate: &Candidate,
+        n_best: usize,
+        context: ConversionContext,
+        additional_entries: &[DictionaryEntry],
+    ) -> Result<Vec<Candidate>, DictionaryError> {
+        if candidate.entries.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut clause_starts = vec![0];
+        for index in 1..candidate.entries.len() {
+            if is_clause(
+                usize::from(candidate.entries[index - 1].right_id),
+                usize::from(candidate.entries[index].left_id),
+            ) {
+                clause_starts.push(index);
+            }
+        }
+        let consumed = composing.surface_graphemes().len();
         let mut output = Vec::new();
-        for prefix in prefixes {
+        let mut successful_groups = 0;
+        for &start in clause_starts.iter().rev() {
+            let ruby = candidate.entries[start..]
+                .iter()
+                .map(|entry| entry.ruby.as_str())
+                .collect::<String>();
+            let predictions = self.predict_for_ruby_prefixes(
+                &[ruby],
+                &candidate.entries[..start],
+                consumed,
+                5,
+                context,
+                additional_entries,
+            )?;
+            if !predictions.is_empty() {
+                output.extend(predictions);
+                successful_groups += 1;
+            }
+            if successful_groups == 2 {
+                if start > 0 {
+                    let full_ruby = candidate
+                        .entries
+                        .iter()
+                        .map(|entry| entry.ruby.as_str())
+                        .collect::<String>();
+                    output.extend(self.predict_for_ruby_prefixes(
+                        &[full_ruby],
+                        &[],
+                        consumed,
+                        5,
+                        context,
+                        additional_entries,
+                    )?);
+                }
+                break;
+            }
+        }
+        output = unique_candidates(output);
+        output.sort_by(|left, right| right.value.total_cmp(&left.value));
+        output.truncate(n_best);
+        Ok(output)
+    }
+
+    fn predict_for_ruby_prefixes(
+        &self,
+        ruby_prefixes: &[String],
+        prefix_entries: &[DictionaryEntry],
+        consumed: usize,
+        n_best: usize,
+        context: ConversionContext,
+        additional_entries: &[DictionaryEntry],
+    ) -> Result<Vec<Candidate>, DictionaryError> {
+        let (prefix_value, prefix_right, prefix_meaning) =
+            self.score_entries(prefix_entries, context)?;
+        let prefix_text = prefix_entries
+            .iter()
+            .map(|entry| entry.word.as_str())
+            .collect::<String>();
+        let mut output = Vec::new();
+        for prefix in ruby_prefixes {
             let prefix_count = UnicodeSegmentation::graphemes(prefix.as_str(), true).count();
             let maximum_depth = match prefix_count {
                 1 => 3,
                 2 => 5,
                 _ => usize::MAX,
             };
-            for entry in self
+            let mut entries = self
                 .dictionary
-                .entries_after_prefix(&prefix, maximum_depth, 700)?
-            {
-                if PREDICTION_UNUSABLE_RIGHT_IDS
-                    .binary_search(&entry.right_id)
-                    .is_ok()
-                {
-                    continue;
-                }
+                .entries_after_prefix(prefix, maximum_depth, 700)?;
+            entries.retain(|entry| prediction_usable(entry.right_id));
+            entries.extend(
+                additional_entries
+                    .iter()
+                    .filter(|entry| entry.ruby.starts_with(prefix) && entry.ruby != *prefix)
+                    .cloned(),
+            );
+            for entry in entries {
                 let entry_ruby_count =
                     UnicodeSegmentation::graphemes(entry.ruby.as_str(), true).count();
                 let penalty = -(entry_ruby_count.saturating_sub(prefix_count) as f32);
                 let meaning = if includes_meaning(&entry) {
                     self.dictionary
-                        .meaning_cost(
-                            usize::from(context.meaning_id),
-                            usize::from(entry.meaning_id),
-                        )
+                        .meaning_cost(usize::from(prefix_meaning), usize::from(entry.meaning_id))
                         .unwrap_or(0.0)
                 } else {
                     0.0
                 };
-                let value = self
-                    .dictionary
-                    .connection_cost(usize::from(context.right_id), usize::from(entry.left_id))?
+                let value = prefix_value
+                    + self
+                        .dictionary
+                        .connection_cost(usize::from(prefix_right), usize::from(entry.left_id))?
                     + entry.value()
                     + meaning
                     + penalty;
                 let last_meaning_id = if includes_meaning(&entry) {
                     entry.meaning_id
                 } else {
-                    context.meaning_id
+                    prefix_meaning
                 };
+                let mut candidate_entries = prefix_entries.to_vec();
+                candidate_entries.push(entry.clone());
                 output.push(Candidate::prediction(
-                    entry.word.clone(),
+                    format!("{prefix_text}{}", entry.word),
                     value,
                     ComposingCount::Surface(consumed),
                     last_meaning_id,
-                    vec![entry],
-                ));
-            }
-            for entry in additional_entries
-                .iter()
-                .filter(|entry| entry.ruby.starts_with(&prefix) && entry.ruby != prefix)
-                .cloned()
-            {
-                let entry_ruby_count =
-                    UnicodeSegmentation::graphemes(entry.ruby.as_str(), true).count();
-                let penalty = -(entry_ruby_count.saturating_sub(prefix_count) as f32);
-                let meaning = if includes_meaning(&entry) {
-                    self.dictionary
-                        .meaning_cost(
-                            usize::from(context.meaning_id),
-                            usize::from(entry.meaning_id),
-                        )
-                        .unwrap_or(0.0)
-                } else {
-                    0.0
-                };
-                let value = self
-                    .dictionary
-                    .connection_cost(usize::from(context.right_id), usize::from(entry.left_id))?
-                    + entry.value()
-                    + meaning
-                    + penalty;
-                let last_meaning_id = if includes_meaning(&entry) {
-                    entry.meaning_id
-                } else {
-                    context.meaning_id
-                };
-                output.push(Candidate::prediction(
-                    entry.word.clone(),
-                    value,
-                    ComposingCount::Surface(consumed),
-                    last_meaning_id,
-                    vec![entry],
+                    candidate_entries,
                 ));
             }
         }
@@ -736,6 +814,56 @@ impl<'a> NormalConverter<'a> {
         output = unique_candidates(output);
         output.truncate(n_best);
         Ok(output)
+    }
+
+    fn score_entries(
+        &self,
+        entries: &[DictionaryEntry],
+        context: ConversionContext,
+    ) -> Result<(f32, u16, u16), DictionaryError> {
+        if entries.is_empty() {
+            return Ok((0.0, context.right_id, context.meaning_id));
+        }
+        let mut value = 0.0;
+        let mut previous_right = context.right_id;
+        let mut clause_meanings = vec![usize::from(context.meaning_id)];
+        for (index, entry) in entries.iter().enumerate() {
+            let starts_clause =
+                index > 0 && is_clause(usize::from(previous_right), usize::from(entry.left_id));
+            if starts_clause {
+                clause_meanings.push(if includes_meaning(entry) {
+                    usize::from(entry.meaning_id)
+                } else {
+                    BOS_MEANING_ID
+                });
+            }
+            let meaning = clause_meanings
+                .last_mut()
+                .expect("an entry always belongs to a clause");
+            if (*meaning == BOS_MEANING_ID && entry.meaning_id != BOS_MEANING_ID as u16)
+                || includes_meaning(entry)
+            {
+                *meaning = usize::from(entry.meaning_id);
+            }
+            value += self
+                .dictionary
+                .connection_cost(usize::from(previous_right), usize::from(entry.left_id))?
+                + entry.value();
+            previous_right = entry.right_id;
+        }
+        let mut previous_meaning = usize::from(context.meaning_id);
+        for meaning in clause_meanings {
+            value += self
+                .dictionary
+                .meaning_cost(previous_meaning, meaning)
+                .unwrap_or(0.0);
+            previous_meaning = meaning;
+        }
+        Ok((
+            value,
+            previous_right,
+            u16::try_from(previous_meaning).unwrap_or(u16::MAX),
+        ))
     }
 
     pub fn word_candidates(

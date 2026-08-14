@@ -85,3 +85,27 @@ fn keeps_compatible_predictions_while_a_roman_suffix_is_unresolved() {
         candidate.composing_count == beankey_converter::ComposingCount::Surface(4)
     }));
 }
+
+#[test]
+fn predicts_from_the_last_clause_while_preserving_the_preceding_conversion() {
+    let dictionary = DictionaryStore::open(dictionary_root()).unwrap();
+    let converter = NormalConverter::new(&dictionary);
+    let tables = InputTableRegistry::new();
+    let mut session = ConversionSession::new();
+    session.insert_str("これはきょう", InputStyle::Direct, &tables);
+
+    let predictions = session
+        .request_predictions(&converter, &tables, 20)
+        .unwrap();
+
+    assert!(predictions.iter().any(|candidate| {
+        candidate.text.starts_with("これは今日")
+            && candidate
+                .entries
+                .iter()
+                .map(|entry| entry.ruby.as_str())
+                .collect::<String>()
+                .starts_with("コレハキョウ")
+            && candidate.ruby_count > 6
+    }));
+}
