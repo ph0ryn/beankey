@@ -1,6 +1,7 @@
 mod binary;
 mod entry;
 mod louds;
+mod store;
 
 pub use binary::{
     DictionaryBinaryError, MeaningMatrix, parse_connection_cost_line, parse_entry_block,
@@ -8,3 +9,4 @@ pub use binary::{
 };
 pub use entry::{DictionaryEntry, DictionaryMetadata};
 pub use louds::{CharacterIdMap, Louds, LoudsError, escaped_identifier};
+pub use store::{DictionaryError, DictionaryMatch, DictionaryStore};

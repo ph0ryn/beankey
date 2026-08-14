@@ -196,7 +196,9 @@ impl MeaningMatrix {
         if former == 500 || latter == 500 {
             return Some(0.0);
         }
-        self.values.get(former * MEANING_COUNT + latter).copied()
+        self.values
+            .get(former.checked_mul(MEANING_COUNT)?.checked_add(latter)?)
+            .copied()
     }
 }
 
