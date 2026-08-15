@@ -14,7 +14,7 @@ fn dictionary_root() -> PathBuf {
 fn emoji_dictionary_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
-        .join("data/azooKey_emoji_dictionary_storage/EmojiDictionary/emoji_all_E16.0.txt")
+        .join("data/azooKey_emoji_dictionary_storage/EmojiDictionary/emoji_all_E17.0.txt")
 }
 
 #[test]
