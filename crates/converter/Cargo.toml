@@ -1,0 +1,21 @@
+[package]
+name = "beankey-converter"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+chrono.workspace = true
+encoding_rs.workspace = true
+icu_calendar.workspace = true
+icu_datetime.workspace = true
+icu_locale.workspace = true
+rand.workspace = true
+tokenizers.workspace = true
+unicode-segmentation.workspace = true
+writeable.workspace = true
+
+[build-dependencies]
+cc = "1.4.3"
+pkg-config = "0.3.32"

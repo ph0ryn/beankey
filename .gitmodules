@@ -1,3 +1,6 @@
 [submodule "data/azooKey_dictionary_storage"]
 	path = data/azooKey_dictionary_storage
 	url = https://github.com/ensan-hcl/azooKey_dictionary_storage
+[submodule "data/azooKey_emoji_dictionary_storage"]
+	path = data/azooKey_emoji_dictionary_storage
+	url = https://github.com/ensan-hcl/azooKey_emoji_dictionary_storage

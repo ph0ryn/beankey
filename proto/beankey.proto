@@ -1,0 +1,235 @@
+syntax = "proto3";
+
+package beankey.v1;
+
+enum InputStyle {
+  INPUT_STYLE_UNSPECIFIED = 0;
+  INPUT_STYLE_DIRECT = 1;
+  INPUT_STYLE_ROMAN_TO_KANA = 2;
+  INPUT_STYLE_AZIK = 3;
+  INPUT_STYLE_KANA_JIS = 4;
+  INPUT_STYLE_KANA_US = 5;
+  INPUT_STYLE_CUSTOM = 6;
+}
+
+enum KeyboardLanguage {
+  KEYBOARD_LANGUAGE_UNSPECIFIED = 0;
+  KEYBOARD_LANGUAGE_JAPANESE = 1;
+  KEYBOARD_LANGUAGE_ENGLISH_US = 2;
+  KEYBOARD_LANGUAGE_GREEK = 3;
+}
+
+message SurroundingText {
+  bool available = 1;
+  string text = 2;
+  uint32 cursor = 3;
+  uint32 anchor = 4;
+}
+
+message StartSession {
+  InputStyle input_style = 1;
+  SurroundingText surrounding_text = 2;
+  KeyboardLanguage keyboard_language = 3;
+  string custom_input_table = 4;
+}
+
+message ResetSession {}
+
+message EndSession {}
+
+enum UserAction {
+  USER_ACTION_UNSPECIFIED = 0;
+  USER_ACTION_INPUT = 1;
+  USER_ACTION_BACKSPACE = 2;
+  USER_ACTION_DELETE_FORWARD = 3;
+  USER_ACTION_ENTER = 4;
+  USER_ACTION_ESCAPE = 5;
+  USER_ACTION_SPACE = 6;
+  USER_ACTION_TAB = 7;
+  USER_ACTION_LEFT = 8;
+  USER_ACTION_RIGHT = 9;
+  USER_ACTION_UP = 10;
+  USER_ACTION_DOWN = 11;
+  USER_ACTION_PAGE_UP = 12;
+  USER_ACTION_PAGE_DOWN = 13;
+  USER_ACTION_FORGET = 14;
+  USER_ACTION_HIRAGANA = 15;
+  USER_ACTION_KATAKANA = 16;
+  USER_ACTION_HALF_WIDTH_KATAKANA = 17;
+  USER_ACTION_FULL_WIDTH_ROMAN = 18;
+  USER_ACTION_HALF_WIDTH_ROMAN = 19;
+  USER_ACTION_CONSUME = 20;
+  USER_ACTION_START_UNICODE_INPUT = 21;
+  USER_ACTION_EISU = 22;
+  USER_ACTION_KANA = 23;
+}
+
+message KeyEvent {
+  UserAction action = 1;
+  bool shift = 2;
+  string text = 3;
+  SurroundingText surrounding_text = 4;
+  string input = 5;
+  string intention = 6;
+  bool option = 7;
+}
+
+message SelectCandidate {
+  uint32 index = 1;
+}
+
+message PageCandidates {
+  enum Direction {
+    DIRECTION_UNSPECIFIED = 0;
+    DIRECTION_PREVIOUS = 1;
+    DIRECTION_NEXT = 2;
+  }
+
+  Direction direction = 1;
+  uint32 page_size = 2;
+}
+
+message CommitComposition {}
+
+message ForgetCandidate {
+  uint32 index = 1;
+}
+
+message ResetLearning {}
+
+message RequestTypoCorrections {}
+
+message SelectTypoCorrection {
+  uint32 index = 1;
+}
+
+message ComposingCount {
+  oneof count {
+    uint32 input = 1;
+    uint32 surface = 2;
+    CompositeComposingCount composite = 3;
+  }
+}
+
+message CompositeComposingCount {
+  ComposingCount left = 1;
+  ComposingCount right = 2;
+}
+
+message CursorAction {
+  sint32 move = 1;
+}
+
+message Candidate {
+  string text = 1;
+  float value = 2;
+  ComposingCount composing_count = 3;
+  repeated CursorAction actions = 4;
+  string annotation = 5;
+  uint32 index = 6;
+}
+
+enum InputState {
+  INPUT_STATE_UNSPECIFIED = 0;
+  INPUT_STATE_NONE = 1;
+  INPUT_STATE_COMPOSING = 2;
+  INPUT_STATE_PREVIEWING = 3;
+  INPUT_STATE_SELECTING = 4;
+  INPUT_STATE_UNICODE = 5;
+}
+
+enum InputLanguage {
+  INPUT_LANGUAGE_UNSPECIFIED = 0;
+  INPUT_LANGUAGE_JAPANESE = 1;
+  INPUT_LANGUAGE_ENGLISH = 2;
+}
+
+enum CandidateWindow {
+  CANDIDATE_WINDOW_UNSPECIFIED = 0;
+  CANDIDATE_WINDOW_HIDDEN = 1;
+  CANDIDATE_WINDOW_PREVIEW = 2;
+  CANDIDATE_WINDOW_SELECTING = 3;
+}
+
+message Prediction {
+  string display_text = 1;
+  string append_text = 2;
+  uint32 delete_count = 3;
+}
+
+message StateResponse {
+  bool consumed = 1;
+  string preedit = 2;
+  uint32 preedit_cursor = 3;
+  repeated Candidate candidates = 4;
+  sint32 selected_candidate = 5;
+  string commit = 6;
+  bool reset = 7;
+  bool lm_typo_available = 8;
+  bool learning_available = 9;
+  bool learning_writable = 10;
+  InputState input_state = 11;
+  CandidateWindow candidate_window = 12;
+  uint32 highlighted_preedit_length = 13;
+  Prediction prediction = 14;
+  InputLanguage input_language = 15;
+}
+
+message TypoCorrectionCandidate {
+  string corrected_input = 1;
+  string converted_text = 2;
+  float score = 3;
+  float language_model_score = 4;
+  float channel_cost = 5;
+  float prominence = 6;
+}
+
+message TypoCorrectionResponse {
+  repeated TypoCorrectionCandidate candidates = 1;
+}
+
+message ProtocolError {
+  enum Code {
+    CODE_UNSPECIFIED = 0;
+    CODE_UNSUPPORTED_VERSION = 1;
+    CODE_INVALID_PAYLOAD = 2;
+    CODE_MESSAGE_TOO_LARGE = 3;
+    CODE_UNKNOWN_SESSION = 4;
+    CODE_OUT_OF_ORDER_REQUEST = 5;
+    CODE_INTERNAL = 6;
+  }
+
+  Code code = 1;
+  string message = 2;
+}
+
+message TraceEvent {
+  string component = 1;
+  string operation = 2;
+  string detail = 3;
+}
+
+message Envelope {
+  uint32 protocol_version = 1;
+  uint64 request_id = 2;
+  string session_id = 3;
+
+  oneof payload {
+    StartSession start_session = 10;
+    ResetSession reset_session = 11;
+    EndSession end_session = 12;
+    KeyEvent key_event = 13;
+    SelectCandidate select_candidate = 14;
+    PageCandidates page_candidates = 15;
+    CommitComposition commit_composition = 16;
+    ForgetCandidate forget_candidate = 17;
+    ResetLearning reset_learning = 18;
+    RequestTypoCorrections request_typo_corrections = 19;
+    StateResponse state_response = 20;
+    ProtocolError protocol_error = 21;
+    TypoCorrectionResponse typo_correction_response = 22;
+    SelectTypoCorrection select_typo_correction = 23;
+  }
+
+  repeated TraceEvent trace = 30;
+}
