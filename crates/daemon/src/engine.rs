@@ -6,14 +6,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use beankey_converter::{
-    CompleteAction, ComposingCount as ConverterComposingCount, ConversionSession, DictionaryEntry,
-    DictionaryError, DictionaryMetadata, DictionaryStore, ForeignCompletionProvider, FormatReport,
-    HunspellCompleter, HunspellError, InputModifier, InputStyle as ConverterInputStyle, InputTable,
-    InputTableId, InputTableRegistry, KeyboardLanguage, LearningError, LearningMemory,
-    LearningMode, LmTypoConfig, NGramError, NGramLanguageModel, NormalConverter,
-    PostCompositionPrediction, PostCompositionPredictor, PredictionMode, RequestOptions,
-    SelectionError, TextReplacer, TextReplacerError, TypoCorrectionMode, ZenzLanguageModel,
-    ZenzV3Config, ZenzVersionConfig, experimental_typo_correction,
+    Candidate as ConverterCandidate, CompleteAction, ComposingCount as ConverterComposingCount,
+    ConversionResult, ConversionSession, DictionaryEntry, DictionaryError, DictionaryMetadata,
+    DictionaryStore, ForeignCompletionProvider, FormatReport, HunspellCompleter, HunspellError,
+    InputModifier, InputStyle as ConverterInputStyle, InputTable, InputTableId, InputTableRegistry,
+    KeyboardLanguage, LearningError, LearningMemory, LearningMode, LmTypoConfig, NGramError,
+    NGramLanguageModel, NormalConverter, PredictionMode, RequestOptions, SelectionError,
+    TextReplacer, TextReplacerError, TypoCorrectionMode, ZenzLanguageModel, ZenzV3Config,
+    ZenzVersionConfig, experimental_typo_correction,
 };
 use beankey_llama::LlamaError;
 use serde::Deserialize;
@@ -28,32 +28,66 @@ use crate::protocol::protocol_error::Code;
 use crate::zenz;
 use crate::{LlamaModel, PROTOCOL_VERSION, protocol};
 
-const KEY_BACKSPACE: u32 = 0xff08;
-const KEY_RETURN: u32 = 0xff0d;
-const KEY_KP_ENTER: u32 = 0xff8d;
-const KEY_ESCAPE: u32 = 0xff1b;
-const KEY_LEFT: u32 = 0xff51;
-const KEY_UP: u32 = 0xff52;
-const KEY_RIGHT: u32 = 0xff53;
-const KEY_DOWN: u32 = 0xff54;
-const KEY_DELETE: u32 = 0xffff;
-const KEY_SPACE: u32 = 0x20;
-const SHIFT_MODIFIER: u32 = 1;
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum InputMode {
+    #[default]
+    None,
+    Composing,
+    Previewing,
+    Selecting,
+}
+
+#[derive(Clone, Debug)]
+struct InputPrediction {
+    display_text: String,
+    append_text: String,
+    delete_count: usize,
+}
 
 struct SessionState {
     conversion: ConversionSession,
     input_style: ConverterInputStyle,
     last_request_id: u64,
     selected_candidate: usize,
+    input_mode: InputMode,
+    display_candidates: Vec<ConverterCandidate>,
+    candidate_remainders: Vec<String>,
+    candidate_annotations: Vec<String>,
+    preview_candidate_index: Option<usize>,
+    additional_candidate_count: usize,
+    segment_surface_count: Option<usize>,
+    last_was_backspace: bool,
+    prediction: Option<InputPrediction>,
+    live_conversion_enabled: bool,
     surrounding: SurroundingContext,
     request_options: RequestOptions,
-    last_committed: Option<beankey_converter::Candidate>,
-    post_predictions: Vec<PostCompositionPrediction>,
     live_candidate: Option<beankey_converter::Candidate>,
     typo_corrections: Vec<beankey_converter::LmTypoCandidate>,
     lm_typo_available: bool,
     learning_available: bool,
     learning_writable: bool,
+}
+
+impl SessionState {
+    fn clear_presentation(&mut self) {
+        self.selected_candidate = 0;
+        self.display_candidates.clear();
+        self.candidate_remainders.clear();
+        self.candidate_annotations.clear();
+        self.preview_candidate_index = None;
+        self.additional_candidate_count = 0;
+        self.prediction = None;
+        self.live_candidate = None;
+    }
+
+    fn reset(&mut self) {
+        self.conversion.reset();
+        self.input_mode = InputMode::None;
+        self.segment_surface_count = None;
+        self.last_was_backspace = false;
+        self.clear_presentation();
+        self.typo_corrections.clear();
+    }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -299,6 +333,7 @@ impl Engine {
     ) -> Result<Self, EngineOpenError> {
         let mut engine = Self::open(dictionary_path)?;
         engine.load_hunspell(english_dictionary, greek_dictionary)?;
+        engine.request_options.foreign_prediction = PredictionMode::Automatic;
         Ok(engine)
     }
 
@@ -631,13 +666,21 @@ impl Engine {
                         input_style,
                         last_request_id: request_id,
                         selected_candidate: 0,
+                        input_mode: InputMode::None,
+                        display_candidates: Vec::new(),
+                        candidate_remainders: Vec::new(),
+                        candidate_annotations: Vec::new(),
+                        preview_candidate_index: None,
+                        additional_candidate_count: 0,
+                        segment_surface_count: None,
+                        last_was_backspace: false,
+                        prediction: None,
+                        live_conversion_enabled: self.live_conversion,
                         surrounding,
                         request_options: RequestOptions {
                             keyboard_language,
                             ..self.request_options.clone()
                         },
-                        last_committed: None,
-                        post_predictions: Vec::new(),
                         live_candidate: None,
                         typo_corrections: Vec::new(),
                         lm_typo_available: self.lm_typo_enabled,
@@ -650,6 +693,8 @@ impl Engine {
                     session_id,
                     protocol::StateResponse {
                         reset: true,
+                        input_state: protocol::InputState::None as i32,
+                        candidate_window: protocol::CandidateWindow::Hidden as i32,
                         lm_typo_available: self.lm_typo_enabled,
                         learning_available: self.learning_available,
                         learning_writable: self.learning_writable,
@@ -703,6 +748,8 @@ impl Engine {
                 session_id,
                 protocol::StateResponse {
                     reset: true,
+                    input_state: protocol::InputState::None as i32,
+                    candidate_window: protocol::CandidateWindow::Hidden as i32,
                     lm_typo_available: session.lm_typo_available,
                     learning_available: session.learning_available,
                     learning_writable: session.learning_writable,
@@ -719,12 +766,7 @@ impl Engine {
                     return typo_correction_envelope(request_id, session_id, candidates);
                 }
                 Err((code, message)) => {
-                    session.conversion.reset();
-                    session.selected_candidate = 0;
-                    session.last_committed = None;
-                    session.post_predictions.clear();
-                    session.live_candidate = None;
-                    session.typo_corrections.clear();
+                    session.reset();
                     self.sessions.insert(session_id.clone(), session);
                     return error_envelope(request_id, session_id, code, message);
                 }
@@ -733,14 +775,11 @@ impl Engine {
 
         let response = match request {
             Payload::ResetSession(_) => {
-                session.conversion.reset();
-                session.selected_candidate = 0;
-                session.last_committed = None;
-                session.post_predictions.clear();
-                session.live_candidate = None;
-                session.typo_corrections.clear();
+                session.reset();
                 Ok(protocol::StateResponse {
                     reset: true,
+                    input_state: protocol::InputState::None as i32,
+                    candidate_window: protocol::CandidateWindow::Hidden as i32,
                     lm_typo_available: session.lm_typo_available,
                     learning_available: session.learning_available,
                     learning_writable: session.learning_writable,
@@ -786,18 +825,15 @@ impl Engine {
                 Ok(make_state(&session, true, String::new(), false))
             }
             Payload::CommitComposition(_) => {
-                let commit = session.conversion.composing().surface();
+                let commit = current_marked_text(&session, &self.tables);
                 let consumed = !commit.is_empty();
-                session.conversion.reset();
-                session.selected_candidate = 0;
-                session.last_committed = None;
-                session.post_predictions.clear();
-                session.live_candidate = None;
-                session.typo_corrections.clear();
+                session.reset();
                 Ok(protocol::StateResponse {
                     consumed,
                     commit,
                     reset: consumed,
+                    input_state: protocol::InputState::None as i32,
+                    candidate_window: protocol::CandidateWindow::Hidden as i32,
                     lm_typo_available: session.lm_typo_available,
                     learning_available: session.learning_available,
                     learning_writable: session.learning_writable,
@@ -818,12 +854,7 @@ impl Engine {
             Ok(response) => state_envelope(request_id, session_id, response),
             Err((code, message)) => {
                 if let Some(session) = self.sessions.get_mut(&session_id) {
-                    session.conversion.reset();
-                    session.selected_candidate = 0;
-                    session.last_committed = None;
-                    session.post_predictions.clear();
-                    session.live_candidate = None;
-                    session.typo_corrections.clear();
+                    session.reset();
                 }
                 error_envelope(request_id, session_id, code, message)
             }
@@ -875,128 +906,323 @@ impl Engine {
         session: &mut SessionState,
         event: protocol::KeyEvent,
     ) -> SessionRequestResult<protocol::StateResponse> {
-        if event.release {
-            return Ok(make_state(session, false, String::new(), false));
-        }
         session.typo_corrections.clear();
-        let post_candidate_count = session.post_predictions.len();
-        match event.key_sym {
-            KEY_BACKSPACE if !session.conversion.composing().is_empty() => {
-                session.conversion.delete_backward(1, &self.tables);
+        let action = protocol::UserAction::try_from(event.action)
+            .unwrap_or(protocol::UserAction::Unspecified);
+
+        if action == protocol::UserAction::Input
+            && session.input_mode == InputMode::Selecting
+            && let Some(number) = selection_number(&event.text)
+        {
+            if number == 0 {
+                let commit = current_marked_text(session, &self.tables);
+                session.reset();
+                insert_event(session, &event, &self.tables);
+                session.input_mode = InputMode::Composing;
+                self.request_candidates(session)?;
+                return Ok(make_state(session, true, commit, false));
             }
-            KEY_DELETE if !session.conversion.composing().is_empty() => {
-                session.conversion.delete_forward(1, &self.tables);
-            }
-            KEY_LEFT if !session.conversion.composing().is_empty() => {
-                session.conversion.move_cursor(-1);
-            }
-            KEY_RIGHT if !session.conversion.composing().is_empty() => {
-                session.conversion.move_cursor(1);
-            }
-            KEY_ESCAPE
-                if !session.conversion.composing().is_empty() || post_candidate_count > 0 =>
-            {
-                session.conversion.reset();
-                session.selected_candidate = 0;
-                session.last_committed = None;
-                session.post_predictions.clear();
-                session.live_candidate = None;
-                return Ok(protocol::StateResponse {
-                    consumed: true,
-                    reset: true,
-                    lm_typo_available: session.lm_typo_available,
-                    learning_available: session.learning_available,
-                    learning_writable: session.learning_writable,
-                    ..Default::default()
-                });
-            }
-            KEY_RETURN | KEY_KP_ENTER if !session.conversion.composing().is_empty() => {
-                if session.conversion.candidates().is_empty() {
-                    let commit = session.conversion.composing().surface();
-                    session.conversion.reset();
-                    session.live_candidate = None;
-                    return Ok(protocol::StateResponse {
-                        consumed: true,
-                        commit,
-                        reset: true,
-                        lm_typo_available: session.lm_typo_available,
-                        learning_available: session.learning_available,
-                        learning_writable: session.learning_writable,
-                        ..Default::default()
-                    });
-                }
-                return self.select_candidate(session, session.selected_candidate);
-            }
-            KEY_SPACE if !session.conversion.composing().is_empty() => {
-                if !session.conversion.candidates().is_empty() {
-                    session.live_candidate = None;
-                    session.selected_candidate =
-                        (session.selected_candidate + 1) % session.conversion.candidates().len();
-                    return Ok(make_state(session, true, String::new(), false));
-                }
-            }
-            KEY_SPACE if post_candidate_count > 0 => {
-                session.selected_candidate =
-                    (session.selected_candidate + 1) % post_candidate_count;
-                return Ok(make_state(session, true, String::new(), false));
-            }
-            KEY_UP | KEY_DOWN if active_candidate_count(session) > 0 => {
-                let count = active_candidate_count(session);
-                session.live_candidate = None;
-                session.selected_candidate = if event.key_sym == KEY_UP {
-                    session
-                        .selected_candidate
-                        .checked_sub(1)
-                        .unwrap_or(count - 1)
-                } else {
-                    (session.selected_candidate + 1) % count
-                };
-                return Ok(make_state(session, true, String::new(), false));
-            }
-            _ if valid_event_text(&event) => {
-                session.last_committed = None;
-                session.post_predictions.clear();
-                session.live_candidate = None;
-                if matches!(session.input_style, ConverterInputStyle::Mapped(_))
-                    && (!event.input.is_empty() || !event.intention.is_empty())
-                {
-                    let input = if event.input.is_empty() {
-                        event.text.clone()
-                    } else {
-                        event.input
-                    };
-                    let modifiers =
-                        (event.modifiers & SHIFT_MODIFIER != 0).then_some(InputModifier::Shift);
-                    session.conversion.insert_key(
-                        (!event.intention.is_empty()).then_some(event.intention),
-                        input,
-                        modifiers,
-                        session.input_style.clone(),
-                        &self.tables,
-                    );
-                } else {
-                    session.conversion.insert_str(
-                        &event.text,
-                        session.input_style.clone(),
-                        &self.tables,
-                    );
-                }
-            }
-            _ if post_candidate_count > 0 => {
-                session.last_committed = None;
-                session.post_predictions.clear();
-                session.live_candidate = None;
-                return Ok(make_state(session, false, String::new(), true));
-            }
-            _ => return Ok(make_state(session, false, String::new(), false)),
+            let page_start = session.selected_candidate / 9 * 9;
+            let index = page_start + number - 1;
+            return self.select_candidate(session, index);
         }
 
-        session.selected_candidate = 0;
-        session.live_candidate = None;
-        if !session.conversion.composing().is_empty() {
-            self.request_candidates(session)?;
+        match action {
+            protocol::UserAction::Backspace if !session.conversion.composing().is_empty() => {
+                session.conversion.delete_backward(1, &self.tables);
+                session.segment_surface_count = None;
+                session.last_was_backspace = true;
+                if session.conversion.composing().is_empty() {
+                    session.reset();
+                    return Ok(make_state(session, true, String::new(), true));
+                }
+                session.input_mode = InputMode::Composing;
+                session.clear_presentation();
+                self.request_candidates(session)?;
+                // azooKey-Desktop deliberately shows the raw reading immediately after deletion.
+                session.live_candidate = None;
+                return Ok(make_state(session, true, String::new(), false));
+            }
+            protocol::UserAction::DeleteForward if !session.conversion.composing().is_empty() => {
+                session.conversion.delete_forward(1, &self.tables);
+                session.segment_surface_count = None;
+                session.last_was_backspace = false;
+                if session.conversion.composing().is_empty() {
+                    session.reset();
+                    return Ok(make_state(session, true, String::new(), true));
+                }
+                session.input_mode = InputMode::Composing;
+                session.clear_presentation();
+                self.request_candidates(session)?;
+                return Ok(make_state(session, true, String::new(), false));
+            }
+            protocol::UserAction::Escape => match session.input_mode {
+                InputMode::None => return Ok(make_state(session, false, String::new(), false)),
+                InputMode::Composing => {
+                    session.reset();
+                    return Ok(make_state(session, true, String::new(), true));
+                }
+                InputMode::Previewing => {
+                    session.input_mode = InputMode::Composing;
+                    return Ok(make_state(session, true, String::new(), false));
+                }
+                InputMode::Selecting => {
+                    session.input_mode = if self.live_conversion {
+                        InputMode::Composing
+                    } else {
+                        InputMode::Previewing
+                    };
+                    return Ok(make_state(session, true, String::new(), false));
+                }
+            },
+            protocol::UserAction::Enter if session.input_mode != InputMode::None => {
+                if session.input_mode == InputMode::Selecting {
+                    return self.select_candidate(session, session.selected_candidate);
+                }
+                let commit = current_marked_text(session, &self.tables);
+                session.reset();
+                return Ok(make_state(session, true, commit, true));
+            }
+            protocol::UserAction::Space => match session.input_mode {
+                InputMode::None => {
+                    let commit = if event.shift { " " } else { "　" }.to_owned();
+                    return Ok(make_state(session, true, commit, false));
+                }
+                InputMode::Composing => {
+                    session.selected_candidate = 0;
+                    session.input_mode = if self.live_conversion {
+                        InputMode::Selecting
+                    } else {
+                        InputMode::Previewing
+                    };
+                    return Ok(make_state(session, true, String::new(), false));
+                }
+                InputMode::Previewing => {
+                    session.input_mode = InputMode::Selecting;
+                    return Ok(make_state(session, true, String::new(), false));
+                }
+                InputMode::Selecting => {
+                    let count = session.display_candidates.len();
+                    if count > 0 {
+                        session.selected_candidate = if event.shift {
+                            session.selected_candidate.saturating_sub(1)
+                        } else {
+                            (session.selected_candidate + 1).min(count - 1)
+                        };
+                    }
+                    return Ok(make_state(session, true, String::new(), false));
+                }
+            },
+            protocol::UserAction::Down => match session.input_mode {
+                InputMode::Composing | InputMode::Previewing => {
+                    session.input_mode = InputMode::Selecting;
+                    session.selected_candidate = 0;
+                    return Ok(make_state(session, true, String::new(), false));
+                }
+                InputMode::Selecting => {
+                    let count = session.display_candidates.len();
+                    if count > 0 {
+                        session.selected_candidate =
+                            (session.selected_candidate + 1).min(count - 1);
+                    }
+                    return Ok(make_state(session, true, String::new(), false));
+                }
+                InputMode::None => return Ok(make_state(session, false, String::new(), false)),
+            },
+            protocol::UserAction::Up => {
+                if session.input_mode == InputMode::Selecting {
+                    if session.selected_candidate == 0 && session.additional_candidate_count < 5 {
+                        self.reveal_additional_candidate(session);
+                    } else {
+                        session.selected_candidate = session.selected_candidate.saturating_sub(1);
+                    }
+                }
+                let consumed = session.input_mode != InputMode::None;
+                return Ok(make_state(session, consumed, String::new(), false));
+            }
+            protocol::UserAction::Left | protocol::UserAction::Right
+                if event.shift && session.input_mode != InputMode::None =>
+            {
+                if let Some(remaining) = session
+                    .candidate_remainders
+                    .get(session.selected_candidate)
+                    .filter(|_| session.input_mode == InputMode::Selecting)
+                {
+                    let prefix = session
+                        .display_candidates
+                        .get(session.selected_candidate)
+                        .map(|candidate| {
+                            session
+                                .conversion
+                                .consumed_surface_count(candidate, &self.tables)
+                        })
+                        .unwrap_or_else(|| {
+                            session
+                                .conversion
+                                .composing()
+                                .surface_graphemes()
+                                .len()
+                                .saturating_sub(remaining.chars().count())
+                        });
+                    let cursor = session.conversion.composing().cursor();
+                    session
+                        .conversion
+                        .move_cursor(prefix as isize - cursor as isize);
+                }
+                let total = session.conversion.composing().surface_graphemes().len();
+                let current = session.conversion.composing().cursor();
+                let target = if action == protocol::UserAction::Right {
+                    if current >= total { 1 } else { current + 1 }
+                } else {
+                    current.saturating_sub(1).max(1)
+                };
+                session
+                    .conversion
+                    .move_cursor(target as isize - current as isize);
+                session.segment_surface_count = Some(target);
+                session.input_mode = InputMode::Selecting;
+                session.clear_presentation();
+                self.request_candidates(session)?;
+                session.live_candidate = None;
+                return Ok(make_state(session, true, String::new(), false));
+            }
+            protocol::UserAction::Right if session.input_mode == InputMode::Selecting => {
+                return self.select_candidate_with_remainder_mode(
+                    session,
+                    session.selected_candidate,
+                    InputMode::Selecting,
+                );
+            }
+            protocol::UserAction::Left | protocol::UserAction::Right
+                if session.input_mode != InputMode::None =>
+            {
+                return Ok(make_state(session, true, String::new(), false));
+            }
+            protocol::UserAction::Tab if session.input_mode != InputMode::None => {
+                if session.input_mode == InputMode::Composing
+                    && let Some(prediction) = session.prediction.clone()
+                {
+                    session.last_was_backspace = false;
+                    if prediction.delete_count > 0 {
+                        session
+                            .conversion
+                            .delete_backward(prediction.delete_count, &self.tables);
+                    }
+                    session.conversion.insert_str(
+                        &prediction.append_text,
+                        session.input_style.clone(),
+                        &self.tables,
+                    );
+                    self.request_candidates(session)?;
+                }
+                return Ok(make_state(session, true, String::new(), false));
+            }
+            protocol::UserAction::Hiragana
+            | protocol::UserAction::Katakana
+            | protocol::UserAction::HalfWidthKatakana
+            | protocol::UserAction::FullWidthRoman
+            | protocol::UserAction::HalfWidthRoman
+                if session.input_mode != InputMode::None =>
+            {
+                let representation_index = match action {
+                    protocol::UserAction::HalfWidthRoman => 0,
+                    protocol::UserAction::FullWidthRoman => 1,
+                    protocol::UserAction::HalfWidthKatakana => 2,
+                    protocol::UserAction::Katakana => 3,
+                    protocol::UserAction::Hiragana => 4,
+                    _ => unreachable!(),
+                };
+                let selected = (session.input_mode == InputMode::Selecting)
+                    .then(|| {
+                        session
+                            .display_candidates
+                            .get(session.selected_candidate)
+                            .cloned()
+                    })
+                    .flatten();
+                let transformed = session
+                    .conversion
+                    .desktop_additional_candidates(selected.as_ref(), &self.tables)
+                    .into_iter()
+                    .nth(representation_index)
+                    .expect("desktop representations have a fixed shape")
+                    .0;
+                return self.commit_candidate(session, transformed, InputMode::Selecting);
+            }
+            protocol::UserAction::PageUp | protocol::UserAction::PageDown
+                if session.input_mode == InputMode::Selecting =>
+            {
+                let count = session.display_candidates.len();
+                if count > 0 {
+                    session.selected_candidate = if action == protocol::UserAction::PageUp {
+                        session.selected_candidate.saturating_sub(9)
+                    } else {
+                        (session.selected_candidate + 9).min(count - 1)
+                    };
+                }
+                return Ok(make_state(session, true, String::new(), false));
+            }
+            protocol::UserAction::Forget if session.input_mode == InputMode::Selecting => {
+                return self.forget_candidate(session, session.selected_candidate);
+            }
+            protocol::UserAction::Input if valid_event_text(&event) => {
+                let commit = matches!(
+                    session.input_mode,
+                    InputMode::Previewing | InputMode::Selecting
+                )
+                .then(|| current_marked_text(session, &self.tables))
+                .unwrap_or_default();
+                if !commit.is_empty() {
+                    session.reset();
+                } else {
+                    session.clear_presentation();
+                }
+                session.segment_surface_count = None;
+                session.last_was_backspace = false;
+                insert_event(session, &event, &self.tables);
+                session.input_mode = InputMode::Composing;
+                self.request_candidates(session)?;
+                return Ok(make_state(session, true, commit, false));
+            }
+            _ => {}
         }
-        Ok(make_state(session, true, String::new(), false))
+        Ok(make_state(session, false, String::new(), false))
+    }
+
+    fn reveal_additional_candidate(&self, session: &mut SessionState) {
+        let base_start = session.additional_candidate_count;
+        let selected = session.display_candidates.get(base_start);
+        let additional = session
+            .conversion
+            .desktop_additional_candidates(selected, &self.tables);
+        let shown = (session.additional_candidate_count + 1).min(additional.len());
+        let base_candidates = session.display_candidates[base_start..].to_vec();
+        let mut candidates = additional[additional.len() - shown..]
+            .iter()
+            .map(|(candidate, _)| candidate.clone())
+            .collect::<Vec<_>>();
+        let mut annotations = additional[additional.len() - shown..]
+            .iter()
+            .map(|(_, annotation)| (*annotation).to_owned())
+            .collect::<Vec<_>>();
+        candidates.extend(base_candidates);
+        annotations.extend(std::iter::repeat_n(
+            String::new(),
+            candidates.len() - annotations.len(),
+        ));
+        session.display_candidates = candidates;
+        session.candidate_annotations = annotations;
+        session.candidate_remainders = session
+            .display_candidates
+            .iter()
+            .map(|candidate| {
+                session
+                    .conversion
+                    .remaining_after_candidate(candidate, &self.tables)
+            })
+            .collect();
+        session.additional_candidate_count = shown;
+        session.selected_candidate = 0;
     }
 
     fn select_candidate(
@@ -1004,13 +1230,18 @@ impl Engine {
         session: &mut SessionState,
         index: usize,
     ) -> SessionRequestResult<protocol::StateResponse> {
+        self.select_candidate_with_remainder_mode(session, index, InputMode::Previewing)
+    }
+
+    fn select_candidate_with_remainder_mode(
+        &mut self,
+        session: &mut SessionState,
+        index: usize,
+        remainder_mode: InputMode,
+    ) -> SessionRequestResult<protocol::StateResponse> {
         session.typo_corrections.clear();
-        if session.conversion.composing().is_empty() && !session.post_predictions.is_empty() {
-            return self.select_post_prediction(session, index);
-        }
         let selected = session
-            .conversion
-            .candidates()
+            .display_candidates
             .get(index)
             .cloned()
             .ok_or_else(|| {
@@ -1019,9 +1250,18 @@ impl Engine {
                     format!("candidate index {index} is outside the current candidates"),
                 )
             })?;
+        self.commit_candidate(session, selected, remainder_mode)
+    }
+
+    fn commit_candidate(
+        &mut self,
+        session: &mut SessionState,
+        selected: ConverterCandidate,
+        remainder_mode: InputMode,
+    ) -> SessionRequestResult<protocol::StateResponse> {
         let commit = session
             .conversion
-            .select_candidate(index, &self.tables)
+            .select_candidate_value(selected, &self.tables)
             .map_err(|error| match error {
                 SelectionError::CandidateOutOfRange { .. } => (
                     Code::InvalidPayload,
@@ -1038,72 +1278,17 @@ impl Engine {
                 format!("learning memory commit failed: {error}"),
             )
         })?;
-        session.selected_candidate = 0;
-        session.live_candidate = None;
+        session.clear_presentation();
+        session.last_was_backspace = false;
         if !session.conversion.composing().is_empty() {
-            session.last_committed = None;
-            session.post_predictions.clear();
+            session.segment_surface_count = None;
+            session.input_mode = remainder_mode;
             self.request_candidates(session)?;
         } else {
-            session.last_committed = Some(selected.clone());
-            session.post_predictions = self.request_post_predictions(&selected)?;
+            session.input_mode = InputMode::None;
         }
-        let reset =
-            session.post_predictions.is_empty() && session.conversion.composing().is_empty();
+        let reset = session.conversion.composing().is_empty();
         Ok(make_state(session, true, commit, reset))
-    }
-
-    fn select_post_prediction(
-        &mut self,
-        session: &mut SessionState,
-        index: usize,
-    ) -> SessionRequestResult<protocol::StateResponse> {
-        session.typo_corrections.clear();
-        let prediction = session
-            .post_predictions
-            .get(index)
-            .cloned()
-            .ok_or_else(|| {
-                (
-                    Code::InvalidPayload,
-                    format!(
-                        "post-composition candidate index {index} is outside the current candidates"
-                    ),
-                )
-            })?;
-        let previous = session.last_committed.as_ref().ok_or_else(|| {
-            (
-                Code::Internal,
-                "post-composition prediction has no committed candidate".into(),
-            )
-        })?;
-        let joined = prediction.join(previous);
-        if let Some(memory) = &self.learning_memory {
-            memory
-                .learn_post_prediction(previous, &prediction)
-                .map_err(|error| {
-                    (
-                        Code::Internal,
-                        format!("post-composition learning failed: {error}"),
-                    )
-                })?;
-            memory.commit().map_err(|error| {
-                (
-                    Code::Internal,
-                    format!("post-composition learning commit failed: {error}"),
-                )
-            })?;
-        }
-        session.selected_candidate = 0;
-        session.live_candidate = None;
-        session.last_committed = Some(joined.clone());
-        session.post_predictions = if prediction.is_terminal {
-            Vec::new()
-        } else {
-            self.request_post_predictions(&joined)?
-        };
-        let reset = session.post_predictions.is_empty();
-        Ok(make_state(session, true, prediction.text, reset))
     }
 
     fn select_typo_correction(
@@ -1121,39 +1306,17 @@ impl Engine {
                     format!("typo correction index {index} is outside the current candidates"),
                 )
             })?;
-        session.conversion.reset();
-        session.selected_candidate = 0;
-        session.last_committed = None;
-        session.post_predictions.clear();
-        session.live_candidate = None;
-        session.typo_corrections.clear();
+        session.reset();
         Ok(protocol::StateResponse {
             consumed: true,
             commit: correction.converted_text,
             reset: true,
+            input_state: protocol::InputState::None as i32,
+            candidate_window: protocol::CandidateWindow::Hidden as i32,
             lm_typo_available: session.lm_typo_available,
             learning_available: session.learning_available,
             learning_writable: session.learning_writable,
             ..Default::default()
-        })
-    }
-
-    fn request_post_predictions(
-        &self,
-        candidate: &beankey_converter::Candidate,
-    ) -> SessionRequestResult<Vec<PostCompositionPrediction>> {
-        let predictions = match &self.text_replacer {
-            Some(replacer) => {
-                PostCompositionPredictor::with_text_replacer(&self.dictionary, replacer)
-                    .predict(candidate)
-            }
-            None => PostCompositionPredictor::new(&self.dictionary).predict(candidate),
-        };
-        predictions.map_err(|error| {
-            (
-                Code::Internal,
-                format!("post-composition prediction failed: {error}"),
-            )
         })
     }
 
@@ -1164,8 +1327,7 @@ impl Engine {
     ) -> SessionRequestResult<protocol::StateResponse> {
         session.typo_corrections.clear();
         let candidate = session
-            .conversion
-            .candidates()
+            .display_candidates
             .get(index)
             .cloned()
             .ok_or_else(|| {
@@ -1209,6 +1371,32 @@ impl Engine {
     }
 
     fn request_candidates(&mut self, session: &mut SessionState) -> SessionRequestResult<()> {
+        let segment_request = session.segment_surface_count.is_some();
+        if segment_request {
+            session.conversion.begin_segment_request(&self.tables);
+        }
+        let result = self.request_candidates_for_active_target(session);
+        if segment_request {
+            session.conversion.end_segment_request();
+            if result.is_ok() {
+                session.candidate_remainders = session
+                    .display_candidates
+                    .iter()
+                    .map(|candidate| {
+                        session
+                            .conversion
+                            .remaining_after_candidate(candidate, &self.tables)
+                    })
+                    .collect();
+            }
+        }
+        result
+    }
+
+    fn request_candidates_for_active_target(
+        &mut self,
+        session: &mut SessionState,
+    ) -> SessionRequestResult<()> {
         session.conversion.refresh_learning().map_err(|error| {
             (
                 Code::Internal,
@@ -1216,7 +1404,7 @@ impl Engine {
             )
         })?;
         let converter = NormalConverter::new(&self.dictionary);
-        if let Some(model) = self.zenz_model.as_deref_mut() {
+        let result = if let Some(model) = self.zenz_model.as_deref_mut() {
             let version = version_with_context(&self.zenz_version, &session.surrounding);
             zenz::convert(
                 &mut session.conversion,
@@ -1272,7 +1460,7 @@ impl Engine {
                         Code::Internal,
                         format!("candidate assembly failed: {error}"),
                     )
-                })?;
+                })?
         } else {
             session
                 .conversion
@@ -1282,9 +1470,35 @@ impl Engine {
                         Code::Internal,
                         format!("candidate generation failed: {error}"),
                     )
-                })?;
-        }
-        let live_candidate = if self.live_conversion && session.conversion.composing().is_at_end() {
+                })?
+        };
+        session.display_candidates = if session.segment_surface_count.is_some() {
+            result.main_results.clone()
+        } else {
+            result.desktop_candidates()
+        };
+        session.candidate_remainders = session
+            .display_candidates
+            .iter()
+            .map(|candidate| {
+                session
+                    .conversion
+                    .remaining_after_candidate(candidate, &self.tables)
+            })
+            .collect();
+        session.candidate_annotations = vec![String::new(); session.display_candidates.len()];
+        session.preview_candidate_index = result.main_results.first().and_then(|preview| {
+            session.display_candidates.iter().position(|candidate| {
+                candidate.text == preview.text
+                    && candidate.composing_count == preview.composing_count
+            })
+        });
+        session.additional_candidate_count = 0;
+        session.prediction = input_prediction(session, &result);
+        let live_candidate = if self.live_conversion
+            && session.segment_surface_count.is_none()
+            && session.conversion.composing().is_at_end()
+        {
             session
                 .conversion
                 .request_live_conversion(&converter, &self.tables)
@@ -1293,14 +1507,10 @@ impl Engine {
             None
         };
         if let Some(live_candidate) = &live_candidate
-            && let Some(index) = session
-                .conversion
-                .candidates()
-                .iter()
-                .position(|candidate| {
-                    candidate.text == live_candidate.text
-                        && candidate.composing_count == live_candidate.composing_count
-                })
+            && let Some(index) = session.display_candidates.iter().position(|candidate| {
+                candidate.text == live_candidate.text
+                    && candidate.composing_count == live_candidate.composing_count
+            })
         {
             session.selected_candidate = index;
         }
@@ -1309,11 +1519,133 @@ impl Engine {
     }
 }
 
+fn insert_event(
+    session: &mut SessionState,
+    event: &protocol::KeyEvent,
+    tables: &InputTableRegistry,
+) {
+    if matches!(session.input_style, ConverterInputStyle::Mapped(_))
+        && (!event.input.is_empty() || !event.intention.is_empty())
+    {
+        let input = if event.input.is_empty() {
+            event.text.clone()
+        } else {
+            event.input.clone()
+        };
+        session.conversion.insert_key(
+            (!event.intention.is_empty()).then(|| event.intention.clone()),
+            input,
+            event.shift.then_some(InputModifier::Shift),
+            session.input_style.clone(),
+            tables,
+        );
+    } else {
+        session
+            .conversion
+            .insert_str(&event.text, session.input_style.clone(), tables);
+    }
+}
+
+fn selection_number(text: &str) -> Option<usize> {
+    (text.chars().count() == 1)
+        .then(|| text.chars().next())
+        .flatten()
+        .and_then(|character| character.to_digit(10))
+        .map(|number| number as usize)
+}
+
+fn current_marked_text(session: &SessionState, _tables: &InputTableRegistry) -> String {
+    if matches!(
+        session.input_mode,
+        InputMode::Previewing | InputMode::Selecting
+    ) && let Some(candidate) = session.display_candidates.get(session.selected_candidate)
+    {
+        let remaining = session
+            .candidate_remainders
+            .get(session.selected_candidate)
+            .map(String::as_str)
+            .unwrap_or("");
+        return format!("{}{remaining}", candidate.text);
+    }
+    session.live_candidate.as_ref().map_or_else(
+        || session.conversion.composing().surface(),
+        |candidate| candidate.text.clone(),
+    )
+}
+
+fn input_prediction(session: &SessionState, result: &ConversionResult) -> Option<InputPrediction> {
+    if session.last_was_backspace
+        && let Some(candidate) = result
+            .main_results
+            .iter()
+            .find(|candidate| candidate.is_typo_correction)
+    {
+        let corrected_reading = to_hiragana(
+            &candidate
+                .entries
+                .iter()
+                .map(|entry| entry.ruby.as_str())
+                .collect::<String>(),
+        );
+        if corrected_reading != session.conversion.composing().surface() {
+            return Some(InputPrediction {
+                display_text: candidate.text.clone(),
+                append_text: corrected_reading,
+                delete_count: session.conversion.composing().surface_graphemes().len(),
+            });
+        }
+    }
+    if session.request_options.japanese_prediction != PredictionMode::Manual {
+        return None;
+    }
+    let surface = session.conversion.composing().surface();
+    let mut target = surface.as_str();
+    let mut delete_count = 0;
+    if surface
+        .chars()
+        .last()
+        .is_some_and(|character| character.is_ascii_alphabetic())
+    {
+        let last = surface.char_indices().next_back()?.0;
+        target = &surface[..last];
+        delete_count = 1;
+    }
+    if target.chars().count() < 2 {
+        return None;
+    }
+    result.prediction_results.iter().find_map(|candidate| {
+        let reading = candidate
+            .entries
+            .iter()
+            .map(|entry| entry.ruby.as_str())
+            .collect::<String>();
+        let reading = to_hiragana(&reading);
+        let append_text = reading.strip_prefix(target)?;
+        (!append_text.is_empty()).then(|| InputPrediction {
+            display_text: candidate.text.clone(),
+            append_text: append_text.to_owned(),
+            delete_count,
+        })
+    })
+}
+
 fn valid_event_text(event: &protocol::KeyEvent) -> bool {
     !event.text.is_empty()
         && !event.text.chars().any(char::is_control)
         && !event.input.chars().any(char::is_control)
         && !event.intention.chars().any(char::is_control)
+}
+
+fn to_hiragana(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| match character {
+            '\u{30a1}'..='\u{30f6}' => {
+                char::from_u32(u32::from(character) - 96).expect("hiragana scalar is valid")
+            }
+            _ => character,
+        })
+        .collect()
 }
 
 fn surrounding_context(
@@ -1332,9 +1664,28 @@ fn surrounding_context(
     }
     let selection_start = cursor.min(anchor);
     let selection_end = cursor.max(anchor);
+    let left: String = surrounding.text.chars().take(selection_start).collect();
+    let left_line = left.rsplit('\n').next().unwrap_or("").trim_start();
+    let left = left_line
+        .chars()
+        .rev()
+        .take(30)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    let right: String = surrounding.text.chars().skip(selection_end).collect();
+    let right = right
+        .split('\n')
+        .next()
+        .unwrap_or("")
+        .trim_end()
+        .chars()
+        .take(30)
+        .collect();
     Ok(SurroundingContext {
-        left: Some(surrounding.text.chars().take(selection_start).collect()),
-        right: Some(surrounding.text.chars().skip(selection_end).collect()),
+        left: Some(left),
+        right: Some(right),
     })
 }
 
@@ -1396,7 +1747,6 @@ fn prediction_mode(value: PredictionConfig) -> PredictionMode {
 
 fn default_request_options() -> RequestOptions {
     RequestOptions {
-        foreign_prediction: PredictionMode::Automatic,
         version_string: Some(format!("beankey {}", env!("CARGO_PKG_VERSION"))),
         ..RequestOptions::default()
     }
@@ -1445,11 +1795,7 @@ fn page_candidates(session: &mut SessionState, page: protocol::PageCandidates) -
 }
 
 fn active_candidate_count(session: &SessionState) -> usize {
-    if session.conversion.composing().is_empty() && !session.post_predictions.is_empty() {
-        session.post_predictions.len()
-    } else {
-        session.conversion.candidates().len()
-    }
+    session.display_candidates.len()
 }
 
 fn make_state(
@@ -1458,59 +1804,106 @@ fn make_state(
     commit: String,
     reset: bool,
 ) -> protocol::StateResponse {
-    let (preedit, preedit_cursor) = session.live_candidate.as_ref().map_or_else(
-        || {
-            (
-                session.conversion.composing().surface(),
-                session.conversion.composing().cursor() as u32,
+    let selected = session.display_candidates.get(session.selected_candidate);
+    let (preedit, highlighted_preedit_length) = match session.input_mode {
+        InputMode::Previewing | InputMode::Selecting => selected.map_or_else(
+            || (session.conversion.composing().surface(), 0),
+            |candidate| {
+                let remaining = session
+                    .candidate_remainders
+                    .get(session.selected_candidate)
+                    .map(String::as_str)
+                    .unwrap_or("");
+                let highlighted = candidate.text.chars().count().min(u32::MAX as usize) as u32;
+                (format!("{}{remaining}", candidate.text), highlighted)
+            },
+        ),
+        InputMode::Composing => session.live_candidate.as_ref().map_or_else(
+            || (session.conversion.composing().surface(), 0),
+            |candidate| {
+                (
+                    candidate.text.clone(),
+                    candidate.text.chars().count().min(u32::MAX as usize) as u32,
+                )
+            },
+        ),
+        InputMode::None => (String::new(), 0),
+    };
+    let preedit_cursor = preedit.chars().count().min(u32::MAX as usize) as u32;
+    let candidate_window = match session.input_mode {
+        InputMode::Selecting => protocol::CandidateWindow::Selecting,
+        InputMode::Composing if !session.live_conversion_enabled => {
+            protocol::CandidateWindow::Preview
+        }
+        _ => protocol::CandidateWindow::Hidden,
+    };
+    let candidate_indices: Vec<usize> = match candidate_window {
+        protocol::CandidateWindow::Selecting => (0..session.display_candidates.len()).collect(),
+        protocol::CandidateWindow::Preview => session
+            .preview_candidate_index
+            .into_iter()
+            .chain(
+                (0..session.display_candidates.len())
+                    .filter(|index| Some(*index) != session.preview_candidate_index),
             )
-        },
-        |candidate| {
-            (
-                candidate.text.clone(),
-                candidate.text.chars().count().min(u32::MAX as usize) as u32,
-            )
-        },
-    );
+            .collect(),
+        _ => (0..session.display_candidates.len()).collect(),
+    };
+    let candidates = candidate_indices
+        .into_iter()
+        .filter_map(|index| {
+            session.display_candidates.get(index).map(|candidate| {
+                candidate_to_protocol(
+                    index,
+                    candidate,
+                    session
+                        .candidate_annotations
+                        .get(index)
+                        .map(String::as_str)
+                        .unwrap_or(""),
+                )
+            })
+        })
+        .collect();
     protocol::StateResponse {
         consumed,
         preedit,
         preedit_cursor,
-        candidates: if session.conversion.composing().is_empty()
-            && !session.post_predictions.is_empty()
-        {
-            session
-                .post_predictions
-                .iter()
-                .map(post_prediction_to_protocol)
-                .collect()
+        candidates,
+        selected_candidate: if session.input_mode == InputMode::Selecting {
+            session.selected_candidate as i32
         } else {
-            session
-                .conversion
-                .candidates()
-                .iter()
-                .map(candidate_to_protocol)
-                .collect()
+            -1
         },
-        selected_candidate: session.selected_candidate as i32,
         commit,
         reset,
         lm_typo_available: session.lm_typo_available,
         learning_available: session.learning_available,
         learning_writable: session.learning_writable,
+        input_state: match session.input_mode {
+            InputMode::None => protocol::InputState::None,
+            InputMode::Composing => protocol::InputState::Composing,
+            InputMode::Previewing => protocol::InputState::Previewing,
+            InputMode::Selecting => protocol::InputState::Selecting,
+        } as i32,
+        candidate_window: candidate_window as i32,
+        highlighted_preedit_length,
+        prediction: (session.input_mode == InputMode::Composing)
+            .then_some(session.prediction.as_ref())
+            .flatten()
+            .map(|prediction| protocol::Prediction {
+                display_text: prediction.display_text.clone(),
+                append_text: prediction.append_text.clone(),
+                delete_count: prediction.delete_count.min(u32::MAX as usize) as u32,
+            }),
     }
 }
 
-fn post_prediction_to_protocol(prediction: &PostCompositionPrediction) -> protocol::Candidate {
-    protocol::Candidate {
-        text: prediction.text.clone(),
-        value: prediction.value,
-        composing_count: None,
-        actions: Vec::new(),
-    }
-}
-
-fn candidate_to_protocol(candidate: &beankey_converter::Candidate) -> protocol::Candidate {
+fn candidate_to_protocol(
+    index: usize,
+    candidate: &beankey_converter::Candidate,
+    annotation: &str,
+) -> protocol::Candidate {
     protocol::Candidate {
         text: candidate.text.clone(),
         value: candidate.value,
@@ -1528,6 +1921,8 @@ fn candidate_to_protocol(candidate: &beankey_converter::Candidate) -> protocol::
                 },
             })
             .collect(),
+        annotation: annotation.to_owned(),
+        index: index.min(u32::MAX as usize) as u32,
     }
 }
 
@@ -1674,6 +2069,7 @@ mod tests {
             .apply_conversion_options(&ConversionConfig {
                 input_style: InputStyleConfig::Direct,
                 keyboard_language: KeyboardLanguageConfig::Greek,
+                foreign_prediction: PredictionConfig::Automatic,
                 ..Default::default()
             })
             .unwrap();
@@ -1697,6 +2093,7 @@ mod tests {
         let response = engine.handle(envelope(
             2,
             Payload::KeyEvent(protocol::KeyEvent {
+                action: protocol::UserAction::Input as i32,
                 text: "καλ".into(),
                 ..Default::default()
             }),
@@ -1725,6 +2122,29 @@ mod tests {
 
         assert_eq!(context.left.as_deref(), Some("甲😀"));
         assert_eq!(context.right.as_deref(), Some("乙"));
+    }
+
+    #[test]
+    fn limits_dynamic_context_to_thirty_trimmed_characters_on_the_current_line() {
+        let left = format!("ignored line\n   {}", "あ".repeat(35));
+        let text = format!("{left}選択{}   \nignored", "い".repeat(35));
+        let left_count = left.chars().count();
+        let context = surrounding_context(Some(&protocol::SurroundingText {
+            available: true,
+            text,
+            cursor: (left_count + 2) as u32,
+            anchor: left_count as u32,
+        }))
+        .unwrap();
+
+        assert_eq!(
+            context.left.as_deref(),
+            Some("ああああああああああああああああああああああああああああああ")
+        );
+        assert_eq!(
+            context.right.as_deref(),
+            Some("いいいいいいいいいいいいいいいいいいいいいいいいいいいいいい")
+        );
     }
 
     #[test]
@@ -1865,6 +2285,7 @@ mod tests {
         engine.handle(envelope(
             2,
             Payload::KeyEvent(protocol::KeyEvent {
+                action: protocol::UserAction::Input as i32,
                 text: "kana".into(),
                 ..Default::default()
             }),
@@ -1896,6 +2317,7 @@ mod tests {
         engine.handle(envelope(
             6,
             Payload::KeyEvent(protocol::KeyEvent {
+                action: protocol::UserAction::Input as i32,
                 text: "kana".into(),
                 ..Default::default()
             }),

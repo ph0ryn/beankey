@@ -394,8 +394,15 @@
             grep -F 'llama_backend_directory = "${self.packages.${system}.daemon.llamaCpp}/bin"' "$config"
             grep -F 'runtime_socket = "beankey/daemon.sock"' "$config"
             grep -F 'keyboard_language = "japanese"' "$config"
+            grep -F 'japanese_prediction = "disabled"' "$config"
+            grep -F 'foreign_prediction = "disabled"' "$config"
+            grep -F 'full_width_roman = true' "$config"
+            grep -F 'half_width_kana = false' "$config"
+            grep -F 'live_conversion = true' "$config"
             grep -F 'mode = "input_and_output"' "$config"
             grep -F 'max_count = 65536' "$config"
+            grep -F 'inference_limit = 5' "$config"
+            grep -F 'enable_alignment_separator = true' "$config"
             touch "$out"
           '';
         }

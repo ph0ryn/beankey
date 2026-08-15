@@ -37,14 +37,36 @@ message ResetSession {}
 
 message EndSession {}
 
+enum UserAction {
+  USER_ACTION_UNSPECIFIED = 0;
+  USER_ACTION_INPUT = 1;
+  USER_ACTION_BACKSPACE = 2;
+  USER_ACTION_DELETE_FORWARD = 3;
+  USER_ACTION_ENTER = 4;
+  USER_ACTION_ESCAPE = 5;
+  USER_ACTION_SPACE = 6;
+  USER_ACTION_TAB = 7;
+  USER_ACTION_LEFT = 8;
+  USER_ACTION_RIGHT = 9;
+  USER_ACTION_UP = 10;
+  USER_ACTION_DOWN = 11;
+  USER_ACTION_PAGE_UP = 12;
+  USER_ACTION_PAGE_DOWN = 13;
+  USER_ACTION_FORGET = 14;
+  USER_ACTION_HIRAGANA = 15;
+  USER_ACTION_KATAKANA = 16;
+  USER_ACTION_HALF_WIDTH_KATAKANA = 17;
+  USER_ACTION_FULL_WIDTH_ROMAN = 18;
+  USER_ACTION_HALF_WIDTH_ROMAN = 19;
+}
+
 message KeyEvent {
-  uint32 key_sym = 1;
-  uint32 modifiers = 2;
-  bool release = 3;
-  string text = 4;
-  SurroundingText surrounding_text = 5;
-  string input = 6;
-  string intention = 7;
+  UserAction action = 1;
+  bool shift = 2;
+  string text = 3;
+  SurroundingText surrounding_text = 4;
+  string input = 5;
+  string intention = 6;
 }
 
 message SelectCandidate {
@@ -98,6 +120,29 @@ message Candidate {
   float value = 2;
   ComposingCount composing_count = 3;
   repeated CursorAction actions = 4;
+  string annotation = 5;
+  uint32 index = 6;
+}
+
+enum InputState {
+  INPUT_STATE_UNSPECIFIED = 0;
+  INPUT_STATE_NONE = 1;
+  INPUT_STATE_COMPOSING = 2;
+  INPUT_STATE_PREVIEWING = 3;
+  INPUT_STATE_SELECTING = 4;
+}
+
+enum CandidateWindow {
+  CANDIDATE_WINDOW_UNSPECIFIED = 0;
+  CANDIDATE_WINDOW_HIDDEN = 1;
+  CANDIDATE_WINDOW_PREVIEW = 2;
+  CANDIDATE_WINDOW_SELECTING = 3;
+}
+
+message Prediction {
+  string display_text = 1;
+  string append_text = 2;
+  uint32 delete_count = 3;
 }
 
 message StateResponse {
@@ -111,6 +156,10 @@ message StateResponse {
   bool lm_typo_available = 8;
   bool learning_available = 9;
   bool learning_writable = 10;
+  InputState input_state = 11;
+  CandidateWindow candidate_window = 12;
+  uint32 highlighted_preedit_length = 13;
+  Prediction prediction = 14;
 }
 
 message TypoCorrectionCandidate {

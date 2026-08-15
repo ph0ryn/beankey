@@ -48,9 +48,8 @@ fn converts_with_the_fixed_zenz_model_and_llama_backend() {
     let converted = engine.handle(envelope(
         2,
         Payload::KeyEvent(protocol::KeyEvent {
-            key_sym: 0,
-            modifiers: 0,
-            release: false,
+            action: protocol::UserAction::Input as i32,
+            shift: false,
             text: "はし".into(),
             surrounding_text: None,
             input: String::new(),
@@ -155,6 +154,7 @@ flash_attention = true
         envelope(
             2,
             Payload::KeyEvent(protocol::KeyEvent {
+                action: protocol::UserAction::Input as i32,
                 text: "hel".into(),
                 ..Default::default()
             }),

@@ -66,6 +66,7 @@ fn serves_isolated_connections_and_exits_after_the_last_disconnect() {
         envelope(
             2,
             Payload::KeyEvent(protocol::KeyEvent {
+                action: protocol::UserAction::Input as i32,
                 text: "あ".into(),
                 ..Default::default()
             }),
@@ -76,6 +77,7 @@ fn serves_isolated_connections_and_exits_after_the_last_disconnect() {
         envelope(
             2,
             Payload::KeyEvent(protocol::KeyEvent {
+                action: protocol::UserAction::Input as i32,
                 text: "い".into(),
                 ..Default::default()
             }),

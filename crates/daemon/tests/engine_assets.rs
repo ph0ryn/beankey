@@ -84,7 +84,20 @@ fn advertises_only_configured_addon_capabilities() {
 
 fn key_event(key_sym: u32, text: &str) -> protocol::KeyEvent {
     protocol::KeyEvent {
-        key_sym,
+        action: match key_sym {
+            0 => protocol::UserAction::Input,
+            0xff08 => protocol::UserAction::Backspace,
+            0xffff => protocol::UserAction::DeleteForward,
+            0xff0d | 0xff8d => protocol::UserAction::Enter,
+            0xff1b => protocol::UserAction::Escape,
+            0xff09 | 0xfe20 => protocol::UserAction::Tab,
+            0xff51 => protocol::UserAction::Left,
+            0xff52 => protocol::UserAction::Up,
+            0xff53 => protocol::UserAction::Right,
+            0xff54 => protocol::UserAction::Down,
+            0x20 => protocol::UserAction::Space,
+            _ => protocol::UserAction::Unspecified,
+        } as i32,
         text: text.into(),
         input: text.into(),
         intention: text.into(),
@@ -111,13 +124,7 @@ fn does_not_turn_control_key_text_into_composition() {
         let request_id = index as u64 * 2 + 2;
         let state = response(engine.handle(envelope(
             request_id,
-            Payload::KeyEvent(protocol::KeyEvent {
-                key_sym,
-                text: text.into(),
-                input: text.into(),
-                intention: text.into(),
-                ..Default::default()
-            }),
+            Payload::KeyEvent(key_event(key_sym, text)),
         )));
         assert!(!state.consumed, "{name} must be returned to Fcitx5");
         assert!(state.preedit.is_empty(), "{name} created preedit text");
@@ -132,7 +139,7 @@ fn does_not_turn_control_key_text_into_composition() {
 }
 
 #[test]
-fn edits_active_composition_with_backspace_and_delete() {
+fn edits_active_composition_with_backspace_and_consumes_navigation() {
     let mut engine = Engine::open(dictionary_root()).unwrap();
     start_roman_session(&mut engine, 1);
 
@@ -151,14 +158,9 @@ fn edits_active_composition_with_backspace_and_delete() {
     )));
     response(engine.handle(envelope(5, Payload::KeyEvent(key_event(0, "kana")))));
     let moved = response(engine.handle(envelope(6, Payload::KeyEvent(key_event(0xff51, "")))));
-    assert_eq!(moved.preedit_cursor, 1);
-
-    let delete =
-        response(engine.handle(envelope(7, Payload::KeyEvent(key_event(0xffff, "\u{7f}")))));
-    assert!(delete.consumed);
-    assert_eq!(delete.preedit, "か");
-    assert_eq!(delete.preedit_cursor, 1);
-    assert!(delete.commit.is_empty());
+    assert!(moved.consumed);
+    assert_eq!(moved.preedit_cursor, 2);
+    assert_eq!(moved.preedit, "かな");
 }
 
 #[test]
@@ -199,7 +201,7 @@ fn escape_cancels_active_composition() {
 }
 
 #[test]
-fn returns_tab_without_mutating_active_composition() {
+fn consumes_tab_without_mutating_active_composition() {
     for (name, key_sym) in [("Tab", 0xff09), ("ISO_Left_Tab", 0xfe20)] {
         let mut engine = Engine::open(dictionary_root()).unwrap();
         start_roman_session(&mut engine, 1);
@@ -207,7 +209,7 @@ fn returns_tab_without_mutating_active_composition() {
             response(engine.handle(envelope(2, Payload::KeyEvent(key_event(0, "kana")))));
 
         let tab = response(engine.handle(envelope(3, Payload::KeyEvent(key_event(key_sym, "\t")))));
-        assert!(!tab.consumed, "{name} must be returned to Fcitx5");
+        assert!(tab.consumed, "{name} must be consumed while composing");
         assert_eq!(tab.preedit, composing.preedit, "{name} changed preedit");
         assert_eq!(
             tab.preedit_cursor, composing.preedit_cursor,
@@ -218,12 +220,264 @@ fn returns_tab_without_mutating_active_composition() {
 }
 
 #[test]
+fn follows_the_non_live_desktop_candidate_state_transitions() {
+    let mut engine = Engine::open(dictionary_root()).unwrap();
+    start_roman_session(&mut engine, 1);
+
+    let composing = response(engine.handle(envelope(2, Payload::KeyEvent(key_event(0, "shikai")))));
+    assert_eq!(
+        composing.input_state,
+        protocol::InputState::Composing as i32
+    );
+    assert_eq!(
+        composing.candidate_window,
+        protocol::CandidateWindow::Preview as i32
+    );
+    assert_eq!(composing.preedit, "しかい");
+
+    let previewing = response(engine.handle(envelope(3, Payload::KeyEvent(key_event(0x20, "")))));
+    assert_eq!(
+        previewing.input_state,
+        protocol::InputState::Previewing as i32
+    );
+    assert_eq!(
+        previewing.candidate_window,
+        protocol::CandidateWindow::Hidden as i32
+    );
+    assert_eq!(previewing.selected_candidate, -1);
+    assert_ne!(previewing.preedit, "しかい");
+
+    let selecting = response(engine.handle(envelope(4, Payload::KeyEvent(key_event(0x20, "")))));
+    assert_eq!(
+        selecting.input_state,
+        protocol::InputState::Selecting as i32
+    );
+    assert_eq!(
+        selecting.candidate_window,
+        protocol::CandidateWindow::Selecting as i32
+    );
+    assert_eq!(selecting.selected_candidate, 0);
+
+    let escaped = response(engine.handle(envelope(5, Payload::KeyEvent(key_event(0xff1b, "")))));
+    assert_eq!(escaped.input_state, protocol::InputState::Previewing as i32);
+    assert_eq!(
+        escaped.candidate_window,
+        protocol::CandidateWindow::Hidden as i32
+    );
+
+    let composing_again =
+        response(engine.handle(envelope(6, Payload::KeyEvent(key_event(0xff1b, "")))));
+    assert_eq!(
+        composing_again.input_state,
+        protocol::InputState::Composing as i32
+    );
+    assert_eq!(composing_again.preedit, "しかい");
+}
+
+#[test]
+fn follows_live_desktop_selection_and_backspace_behavior() {
+    let mut engine = Engine::open_with_conversion_resources(
+        dictionary_root(),
+        &ConversionConfig {
+            live_conversion: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    start_roman_session(&mut engine, 1);
+
+    let composing = response(engine.handle(envelope(2, Payload::KeyEvent(key_event(0, "shikai")))));
+    assert_eq!(
+        composing.candidate_window,
+        protocol::CandidateWindow::Hidden as i32
+    );
+    assert_ne!(composing.preedit, "しかい");
+
+    let selecting = response(engine.handle(envelope(3, Payload::KeyEvent(key_event(0x20, "")))));
+    assert_eq!(selecting.selected_candidate, 0);
+    assert_eq!(
+        selecting.input_state,
+        protocol::InputState::Selecting as i32
+    );
+
+    let next = response(engine.handle(envelope(4, Payload::KeyEvent(key_event(0x20, "")))));
+    assert_eq!(next.selected_candidate, 1);
+    let mut previous_space = key_event(0x20, "");
+    previous_space.shift = true;
+    let previous = response(engine.handle(envelope(5, Payload::KeyEvent(previous_space))));
+    assert_eq!(previous.selected_candidate, 0);
+
+    let raw = response(engine.handle(envelope(6, Payload::KeyEvent(key_event(0xff08, "")))));
+    assert_eq!(raw.input_state, protocol::InputState::Composing as i32);
+    assert_eq!(raw.preedit, "しか");
+    assert_eq!(
+        raw.candidate_window,
+        protocol::CandidateWindow::Hidden as i32
+    );
+}
+
+#[test]
+fn zero_commits_selected_marked_text_and_starts_a_new_composition() {
+    let mut engine = Engine::open(dictionary_root()).unwrap();
+    start_roman_session(&mut engine, 1);
+    response(engine.handle(envelope(2, Payload::KeyEvent(key_event(0, "shikai")))));
+    response(engine.handle(envelope(3, Payload::KeyEvent(key_event(0xff54, "")))));
+
+    let zero = response(engine.handle(envelope(4, Payload::KeyEvent(key_event(0, "0")))));
+    assert!(zero.consumed);
+    assert!(!zero.commit.is_empty());
+    assert_eq!(zero.preedit, "0");
+    assert_eq!(zero.input_state, protocol::InputState::Composing as i32);
+}
+
+#[test]
+fn reveals_desktop_representation_candidates_progressively_above_the_first_candidate() {
+    let mut engine = Engine::open(dictionary_root()).unwrap();
+    start_roman_session(&mut engine, 1);
+    response(engine.handle(envelope(2, Payload::KeyEvent(key_event(0, "shikai")))));
+    response(engine.handle(envelope(3, Payload::KeyEvent(key_event(0xff54, "")))));
+
+    let expected = [
+        vec!["ひらがな"],
+        vec!["カタカナ", "ひらがな"],
+        vec!["半角カナ", "カタカナ", "ひらがな"],
+        vec!["全角英数", "半角カナ", "カタカナ", "ひらがな"],
+        vec!["英数", "全角英数", "半角カナ", "カタカナ", "ひらがな"],
+    ];
+    for (offset, annotations) in expected.into_iter().enumerate() {
+        let state = response(engine.handle(envelope(
+            4 + offset as u64,
+            Payload::KeyEvent(key_event(0xff52, "")),
+        )));
+        assert_eq!(state.selected_candidate, 0);
+        assert_eq!(
+            state
+                .candidates
+                .iter()
+                .take(annotations.len())
+                .map(|candidate| candidate.annotation.as_str())
+                .collect::<Vec<_>>(),
+            annotations
+        );
+    }
+}
+
+#[test]
+fn exposes_manual_prediction_separately_and_accepts_it_with_tab() {
+    let mut engine = Engine::open_with_conversion_resources(
+        dictionary_root(),
+        &ConversionConfig {
+            input_style: beankey_daemon::InputStyleConfig::Direct,
+            japanese_prediction: beankey_daemon::PredictionConfig::Manual,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    response(engine.handle(envelope(
+        1,
+        Payload::StartSession(protocol::StartSession {
+            input_style: protocol::InputStyle::Direct as i32,
+            surrounding_text: None,
+            keyboard_language: protocol::KeyboardLanguage::Japanese as i32,
+            custom_input_table: String::new(),
+        }),
+    )));
+
+    let composing = response(engine.handle(envelope(2, Payload::KeyEvent(key_event(0, "きょ")))));
+    let prediction = composing
+        .prediction
+        .expect("manual prediction was not exposed");
+    assert!(!prediction.display_text.is_empty());
+    assert!(!prediction.append_text.is_empty());
+    assert!(
+        composing
+            .candidates
+            .iter()
+            .all(|candidate| candidate.text != prediction.display_text)
+    );
+
+    let accepted = response(engine.handle(envelope(3, Payload::KeyEvent(key_event(0xff09, "")))));
+    assert!(accepted.consumed);
+    assert_ne!(accepted.preedit, composing.preedit);
+}
+
+#[test]
+fn shift_navigation_edits_the_selected_segment_length() {
+    let mut engine = Engine::open(dictionary_root()).unwrap();
+    response(engine.handle(envelope(
+        1,
+        Payload::StartSession(protocol::StartSession {
+            input_style: protocol::InputStyle::Direct as i32,
+            surrounding_text: None,
+            keyboard_language: protocol::KeyboardLanguage::Japanese as i32,
+            custom_input_table: String::new(),
+        }),
+    )));
+    response(engine.handle(envelope(2, Payload::KeyEvent(key_event(0, "きょうはあめ")))));
+    let initial = response(engine.handle(envelope(3, Payload::KeyEvent(key_event(0xff54, "")))));
+    let initial_remaining =
+        initial.preedit.chars().count() - initial.highlighted_preedit_length as usize;
+
+    let mut shift_right = key_event(0xff53, "");
+    shift_right.shift = true;
+    let one = response(engine.handle(envelope(4, Payload::KeyEvent(shift_right.clone()))));
+    assert!(one.highlighted_preedit_length > 0);
+    let one_remaining = one.preedit.chars().count() - one.highlighted_preedit_length as usize;
+    assert_eq!(one_remaining + 1, initial_remaining);
+
+    let two = response(engine.handle(envelope(5, Payload::KeyEvent(shift_right))));
+    let two_remaining = two.preedit.chars().count() - two.highlighted_preedit_length as usize;
+    assert_eq!(two_remaining + 1, one_remaining);
+
+    let mut shift_left = key_event(0xff51, "");
+    shift_left.shift = true;
+    let one_again = response(engine.handle(envelope(6, Payload::KeyEvent(shift_left))));
+    let one_again_remaining =
+        one_again.preedit.chars().count() - one_again.highlighted_preedit_length as usize;
+    assert_eq!(one_again_remaining, one_remaining);
+}
+
+#[test]
+fn transformed_candidate_commits_only_the_selected_segment() {
+    let mut engine = Engine::open(dictionary_root()).unwrap();
+    response(engine.handle(envelope(
+        1,
+        Payload::StartSession(protocol::StartSession {
+            input_style: protocol::InputStyle::Direct as i32,
+            surrounding_text: None,
+            keyboard_language: protocol::KeyboardLanguage::Japanese as i32,
+            custom_input_table: String::new(),
+        }),
+    )));
+    response(engine.handle(envelope(2, Payload::KeyEvent(key_event(0, "きょうはあめ")))));
+    let selecting = response(engine.handle(envelope(3, Payload::KeyEvent(key_event(0xff54, "")))));
+    assert!(selecting.highlighted_preedit_length < selecting.preedit.chars().count() as u32);
+
+    let transformed = response(engine.handle(envelope(
+        4,
+        Payload::KeyEvent(protocol::KeyEvent {
+            action: protocol::UserAction::Hiragana as i32,
+            ..Default::default()
+        }),
+    )));
+    assert!(transformed.consumed);
+    assert!(!transformed.commit.is_empty());
+    assert!(!transformed.reset);
+    assert!(!transformed.preedit.is_empty());
+    assert_eq!(
+        transformed.input_state,
+        protocol::InputState::Selecting as i32
+    );
+}
+
+#[test]
 fn returns_enter_after_committing_a_candidate() {
     let mut engine = Engine::open(dictionary_root()).unwrap();
     start_roman_session(&mut engine, 1);
     let converted = response(engine.handle(envelope(
         2,
         Payload::KeyEvent(protocol::KeyEvent {
+            action: protocol::UserAction::Input as i32,
             text: "shikai".into(),
             ..Default::default()
         }),
@@ -231,21 +485,20 @@ fn returns_enter_after_committing_a_candidate() {
     let index = converted
         .candidates
         .iter()
-        .position(|candidate| candidate.text == "司会")
-        .unwrap();
+        .find(|candidate| candidate.text == "司会")
+        .unwrap()
+        .index;
     let committed = response(engine.handle(envelope(
         3,
-        Payload::SelectCandidate(protocol::SelectCandidate {
-            index: index as u32,
-        }),
+        Payload::SelectCandidate(protocol::SelectCandidate { index }),
     )));
     assert_eq!(committed.commit, "司会");
-    assert!(!committed.candidates.is_empty());
+    assert!(committed.candidates.is_empty());
 
     let enter = response(engine.handle(envelope(
         4,
         Payload::KeyEvent(protocol::KeyEvent {
-            key_sym: 0xff0d,
+            action: protocol::UserAction::Enter as i32,
             ..Default::default()
         }),
     )));
@@ -296,9 +549,8 @@ fn converts_selects_commits_and_resets_a_session() {
     let converted = response(engine.handle(envelope(
         2,
         Payload::KeyEvent(protocol::KeyEvent {
-            key_sym: 0,
-            modifiers: 0,
-            release: false,
+            action: protocol::UserAction::Input as i32,
+            shift: false,
             text: "shikai".into(),
             surrounding_text: None,
             input: String::new(),
@@ -307,22 +559,25 @@ fn converts_selects_commits_and_resets_a_session() {
     )));
     assert!(converted.consumed);
     assert_eq!(converted.preedit, "しかい");
+    assert_eq!(
+        converted.candidate_window,
+        protocol::CandidateWindow::Preview as i32
+    );
     let index = converted
         .candidates
         .iter()
-        .position(|candidate| candidate.text == "司会")
-        .unwrap();
+        .find(|candidate| candidate.text == "司会")
+        .unwrap()
+        .index;
 
     let selected = response(engine.handle(envelope(
         3,
-        Payload::SelectCandidate(protocol::SelectCandidate {
-            index: index as u32,
-        }),
+        Payload::SelectCandidate(protocol::SelectCandidate { index }),
     )));
     assert_eq!(selected.commit, "司会");
     assert!(selected.preedit.is_empty());
-    assert!(!selected.reset);
-    assert!(!selected.candidates.is_empty());
+    assert!(selected.reset);
+    assert!(selected.candidates.is_empty());
 
     let reset = response(engine.handle(envelope(
         4,
@@ -350,12 +605,17 @@ fn uses_the_configured_input_style_when_the_addon_does_not_override_it() {
     let converted = response(engine.handle(envelope(
         2,
         Payload::KeyEvent(protocol::KeyEvent {
+            action: protocol::UserAction::Input as i32,
             text: "shikai".into(),
             ..Default::default()
         }),
     )));
 
-    assert_eq!(converted.preedit, "しかい");
+    assert_ne!(converted.preedit, "shikai");
+    assert_eq!(
+        converted.candidate_window,
+        protocol::CandidateWindow::Hidden as i32
+    );
     assert!(
         converted
             .candidates
@@ -379,9 +639,8 @@ fn forwards_explicit_kana_key_intention_and_input() {
     let converted = response(engine.handle(envelope(
         2,
         Payload::KeyEvent(protocol::KeyEvent {
-            key_sym: 0,
-            modifiers: 0,
-            release: false,
+            action: protocol::UserAction::Input as i32,
+            shift: false,
             text: "q".into(),
             surrounding_text: None,
             input: "q".into(),
@@ -412,6 +671,7 @@ fn completes_foreign_input_with_the_configured_hunspell_assets() {
     let english = response(engine.handle(envelope(
         2,
         Payload::KeyEvent(protocol::KeyEvent {
+            action: protocol::UserAction::Input as i32,
             text: "hel".into(),
             ..Default::default()
         }),
@@ -435,6 +695,7 @@ fn completes_foreign_input_with_the_configured_hunspell_assets() {
     let greek = response(engine.handle(envelope(
         4,
         Payload::KeyEvent(protocol::KeyEvent {
+            action: protocol::UserAction::Input as i32,
             text: "καλ".into(),
             ..Default::default()
         }),
@@ -463,6 +724,7 @@ fn persists_forgets_and_resets_learning_through_session_requests() {
     let converted = response(engine.handle(envelope(
         2,
         Payload::KeyEvent(protocol::KeyEvent {
+            action: protocol::UserAction::Input as i32,
             text: "shikai".into(),
             ..Default::default()
         }),
@@ -470,13 +732,12 @@ fn persists_forgets_and_resets_learning_through_session_requests() {
     let selected = converted
         .candidates
         .iter()
-        .position(|candidate| candidate.text == "司会")
-        .unwrap();
+        .find(|candidate| candidate.text == "司会")
+        .unwrap()
+        .index;
     response(engine.handle(envelope(
         3,
-        Payload::SelectCandidate(protocol::SelectCandidate {
-            index: selected as u32,
-        }),
+        Payload::SelectCandidate(protocol::SelectCandidate { index: selected }),
     )));
     let memory_path = state.path().join("memory.bin");
     let learned_size = std::fs::metadata(&memory_path).unwrap().len();
@@ -495,6 +756,7 @@ fn persists_forgets_and_resets_learning_through_session_requests() {
     let converted = response(restarted.handle(envelope(
         2,
         Payload::KeyEvent(protocol::KeyEvent {
+            action: protocol::UserAction::Input as i32,
             text: "shikai".into(),
             ..Default::default()
         }),
@@ -502,13 +764,12 @@ fn persists_forgets_and_resets_learning_through_session_requests() {
     let learned = converted
         .candidates
         .iter()
-        .position(|candidate| candidate.text == "司会")
-        .unwrap();
+        .find(|candidate| candidate.text == "司会")
+        .unwrap()
+        .index;
     response(restarted.handle(envelope(
         3,
-        Payload::ForgetCandidate(protocol::ForgetCandidate {
-            index: learned as u32,
-        }),
+        Payload::ForgetCandidate(protocol::ForgetCandidate { index: learned }),
     )));
     assert!(std::fs::metadata(&memory_path).unwrap().len() < learned_size);
 
@@ -520,7 +781,7 @@ fn persists_forgets_and_resets_learning_through_session_requests() {
 }
 
 #[test]
-fn offers_and_commits_emoji_post_composition_predictions() {
+fn does_not_offer_post_composition_predictions_in_the_desktop_ux() {
     let mut engine = Engine::open_with_emoji(dictionary_root(), emoji_dictionary_path()).unwrap();
     response(engine.handle(envelope(
         1,
@@ -534,6 +795,7 @@ fn offers_and_commits_emoji_post_composition_predictions() {
     let converted = response(engine.handle(envelope(
         2,
         Payload::KeyEvent(protocol::KeyEvent {
+            action: protocol::UserAction::Input as i32,
             text: "egao".into(),
             ..Default::default()
         }),
@@ -541,38 +803,17 @@ fn offers_and_commits_emoji_post_composition_predictions() {
     let smile = converted
         .candidates
         .iter()
-        .position(|candidate| candidate.text == "笑顔")
-        .unwrap();
+        .find(|candidate| candidate.text == "笑顔")
+        .unwrap()
+        .index;
     let committed = response(engine.handle(envelope(
         3,
-        Payload::SelectCandidate(protocol::SelectCandidate {
-            index: smile as u32,
-        }),
+        Payload::SelectCandidate(protocol::SelectCandidate { index: smile }),
     )));
     assert_eq!(committed.commit, "笑顔");
     assert!(committed.preedit.is_empty());
-    assert!(!committed.reset);
-    assert_eq!(
-        committed.candidates[..3]
-            .iter()
-            .filter(|candidate| candidate.value == -3.0)
-            .count(),
-        3
-    );
-
-    let emoji = committed
-        .candidates
-        .iter()
-        .position(|candidate| candidate.value == -3.0)
-        .unwrap();
-    let selected = response(engine.handle(envelope(
-        4,
-        Payload::SelectCandidate(protocol::SelectCandidate {
-            index: emoji as u32,
-        }),
-    )));
-    assert!(!selected.commit.is_empty());
-    assert!(!selected.commit.is_ascii());
+    assert!(committed.reset);
+    assert!(committed.candidates.is_empty());
 }
 
 #[test]
@@ -609,12 +850,17 @@ fn uses_a_json_user_dictionary_with_a_named_custom_input_table() {
     let converted = response(engine.handle(envelope(
         2,
         Payload::KeyEvent(protocol::KeyEvent {
+            action: protocol::UserAction::Input as i32,
             text: "qq".into(),
             ..Default::default()
         }),
     )));
 
-    assert_eq!(converted.preedit, "あいさつ");
+    assert_ne!(converted.preedit, "qq");
+    assert_eq!(
+        converted.candidate_window,
+        protocol::CandidateWindow::Hidden as i32
+    );
     assert!(
         converted
             .candidates
@@ -649,6 +895,7 @@ fn applies_conversion_options_and_displays_live_conversion() {
     let converted = response(engine.handle(envelope(
         2,
         Payload::KeyEvent(protocol::KeyEvent {
+            action: protocol::UserAction::Input as i32,
             text: "かなかんじへんかん".into(),
             ..Default::default()
         }),
@@ -663,7 +910,7 @@ fn applies_conversion_options_and_displays_live_conversion() {
     let committed = response(engine.handle(envelope(
         3,
         Payload::KeyEvent(protocol::KeyEvent {
-            key_sym: 0xff0d,
+            action: protocol::UserAction::Enter as i32,
             ..Default::default()
         }),
     )));
@@ -676,6 +923,7 @@ fn applies_conversion_options_and_displays_live_conversion() {
     let representations = response(engine.handle(envelope(
         5,
         Payload::KeyEvent(protocol::KeyEvent {
+            action: protocol::UserAction::Input as i32,
             text: "ABC".into(),
             ..Default::default()
         }),
@@ -822,9 +1070,8 @@ fn applies_zenz_prefix_correction_through_the_session_engine() {
     let converted = response(engine.handle(envelope(
         2,
         Payload::KeyEvent(protocol::KeyEvent {
-            key_sym: 0,
-            modifiers: 0,
-            release: false,
+            action: protocol::UserAction::Input as i32,
+            shift: false,
             text: "はし".into(),
             surrounding_text: None,
             input: String::new(),
@@ -858,9 +1105,8 @@ fn preserves_special_candidates_after_zenz_conversion() {
     let converted = response(engine.handle(envelope(
         2,
         Payload::KeyEvent(protocol::KeyEvent {
-            key_sym: 0,
-            modifiers: 0,
-            release: false,
+            action: protocol::UserAction::Input as i32,
+            shift: false,
             text: "U+1F600".into(),
             surrounding_text: None,
             input: String::new(),

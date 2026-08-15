@@ -183,10 +183,10 @@ mod tests {
             Err(FrameError::MissingPayload)
         ));
         envelope.payload = Some(Payload::ResetSession(protocol::ResetSession {}));
-        envelope.protocol_version = 2;
+        envelope.protocol_version = PROTOCOL_VERSION + 1;
         assert!(matches!(
             validate_envelope(&envelope),
-            Err(FrameError::UnsupportedVersion(2))
+            Err(FrameError::UnsupportedVersion(version)) if version == PROTOCOL_VERSION + 1
         ));
     }
 
