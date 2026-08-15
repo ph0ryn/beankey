@@ -1,0 +1,413 @@
+#include "engine.h"
+
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/un.h>
+#include <unistd.h>
+
+#include <fcitx-utils/capabilityflags.h>
+#include <fcitx-utils/key.h>
+#include <fcitx-utils/keysym.h>
+#include <fcitx/candidatelist.h>
+#include <fcitx/event.h>
+#include <fcitx/inputcontext.h>
+#include <fcitx/inputcontextmanager.h>
+#include <fcitx/inputmethodentry.h>
+#include <fcitx/inputpanel.h>
+#include <fcitx/instance.h>
+#include <fcitx/statusarea.h>
+
+#include <algorithm>
+#include <array>
+#include <cstdint>
+#include <cstdlib>
+#include <cstring>
+#include <iostream>
+#include <string>
+#include <thread>
+#include <utility>
+
+#include "beankey.pb.h"
+
+namespace {
+
+bool readAll(int socket, void *data, std::size_t size) {
+  auto *current = static_cast<std::uint8_t *>(data);
+  while (size > 0) {
+    const auto count = read(socket, current, size);
+    if (count <= 0) {
+      return false;
+    }
+    current += count;
+    size -= static_cast<std::size_t>(count);
+  }
+  return true;
+}
+
+bool writeAll(int socket, const void *data, std::size_t size) {
+  const auto *current = static_cast<const std::uint8_t *>(data);
+  while (size > 0) {
+    const auto count = write(socket, current, size);
+    if (count <= 0) {
+      return false;
+    }
+    current += count;
+    size -= static_cast<std::size_t>(count);
+  }
+  return true;
+}
+
+std::string readFrame(int socket) {
+  std::uint32_t size = 0;
+  for (unsigned int index = 0; index < 5; ++index) {
+    std::uint8_t byte = 0;
+    if (!readAll(socket, &byte, 1)) {
+      return {};
+    }
+    size |= static_cast<std::uint32_t>(byte & 0x7fU) << (index * 7U);
+    if ((byte & 0x80U) == 0) {
+      std::string payload(size, '\0');
+      return readAll(socket, payload.data(), payload.size()) ? payload
+                                                             : std::string{};
+    }
+  }
+  return {};
+}
+
+bool writeFrame(int socket, const std::string &payload) {
+  std::array<std::uint8_t, 5> prefix{};
+  auto size = static_cast<std::uint32_t>(payload.size());
+  std::size_t count = 0;
+  do {
+    auto byte = static_cast<std::uint8_t>(size & 0x7fU);
+    size >>= 7U;
+    if (size != 0) {
+      byte |= 0x80U;
+    }
+    prefix[count++] = byte;
+  } while (size != 0);
+  return writeAll(socket, prefix.data(), count) &&
+         writeAll(socket, payload.data(), payload.size());
+}
+
+class TestInputContext final : public fcitx::InputContext {
+public:
+  explicit TestInputContext(fcitx::InputContextManager &manager)
+      : InputContext(manager, "beankey-engine-test") {
+    created();
+  }
+
+  ~TestInputContext() override { destroy(); }
+
+  const char *frontend() const override { return "beankey-test"; }
+
+  const std::string &committed() const { return committed_; }
+
+protected:
+  void commitStringImpl(const std::string &text) override {
+    committed_ += text;
+  }
+  void deleteSurroundingTextImpl(int, unsigned int) override {}
+  void forwardKeyImpl(const fcitx::ForwardKeyEvent &) override {}
+  void updatePreeditImpl() override {}
+
+private:
+  std::string committed_;
+};
+
+bool report(bool condition, const char *message) {
+  if (!condition) {
+    std::cerr << message << '\n';
+  }
+  return condition;
+}
+
+} // namespace
+
+int main() {
+  std::array<char, 64> directoryTemplate{};
+  std::strcpy(directoryTemplate.data(), "/tmp/beankey-engine-test.XXXXXX");
+  const char *runtimeDirectory = mkdtemp(directoryTemplate.data());
+  if (!report(runtimeDirectory != nullptr,
+              "failed to create runtime directory")) {
+    return 1;
+  }
+  const std::string beankeyDirectory =
+      std::string(runtimeDirectory) + "/beankey";
+  if (!report(mkdir(beankeyDirectory.c_str(), 0700) == 0,
+              "failed to create beankey runtime directory")) {
+    return 1;
+  }
+  const std::string socketPath = beankeyDirectory + "/daemon.sock";
+  if (!report(setenv("XDG_RUNTIME_DIR", runtimeDirectory, 1) == 0,
+              "failed to set runtime directory")) {
+    return 1;
+  }
+
+  const int listener = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+  sockaddr_un address{};
+  address.sun_family = AF_UNIX;
+  std::memcpy(address.sun_path, socketPath.c_str(), socketPath.size() + 1);
+  if (!report(listener >= 0, "failed to create daemon socket") ||
+      !report(bind(listener, reinterpret_cast<const sockaddr *>(&address),
+                   sizeof(address)) == 0,
+              "failed to bind daemon socket") ||
+      !report(listen(listener, 1) == 0, "failed to listen on daemon socket")) {
+    return 1;
+  }
+
+  bool serverValid = true;
+  std::thread server([listener, &serverValid] {
+    const int connection = accept4(listener, nullptr, nullptr, SOCK_CLOEXEC);
+    if (connection < 0) {
+      serverValid = false;
+      close(listener);
+      return;
+    }
+    enum class ExpectedRequest {
+      Start,
+      Key,
+      Forget,
+      ResetLearning,
+      Typo,
+      SelectTypo
+    };
+    const auto exchange = [&](ExpectedRequest expected) {
+      beankey::v1::Envelope request;
+      if (!request.ParseFromString(readFrame(connection))) {
+        return false;
+      }
+      const bool expectedPayload = [&] {
+        switch (expected) {
+        case ExpectedRequest::Start:
+          return request.has_start_session();
+        case ExpectedRequest::Key:
+          return request.has_key_event();
+        case ExpectedRequest::Forget:
+          return request.has_forget_candidate();
+        case ExpectedRequest::ResetLearning:
+          return request.has_reset_learning();
+        case ExpectedRequest::Typo:
+          return request.has_request_typo_corrections();
+        case ExpectedRequest::SelectTypo:
+          return request.has_select_typo_correction();
+        }
+        return false;
+      }();
+      if (!expectedPayload) {
+        return false;
+      }
+
+      beankey::v1::Envelope response;
+      response.set_protocol_version(request.protocol_version());
+      response.set_request_id(request.request_id());
+      response.set_session_id(request.session_id());
+      if (expected == ExpectedRequest::Typo) {
+        auto *candidate =
+            response.mutable_typo_correction_response()->add_candidates();
+        candidate->set_corrected_input("かな");
+        candidate->set_converted_text("仮名");
+      } else {
+        auto *state = response.mutable_state_response();
+        state->set_lm_typo_available(true);
+        state->set_learning_available(true);
+        state->set_learning_writable(true);
+        if (expected == ExpectedRequest::Start) {
+          state->set_consumed(true);
+        } else if (expected == ExpectedRequest::Key &&
+                   request.key_event().key_sym() == FcitxKey_a) {
+          state->set_consumed(true);
+          state->set_preedit("かな");
+          state->set_preedit_cursor(2);
+          state->set_selected_candidate(0);
+          auto *candidate = state->add_candidates();
+          candidate->set_text("司会");
+          candidate->mutable_composing_count()->set_input(1);
+        } else if (expected == ExpectedRequest::Key &&
+                   request.key_event().key_sym() == FcitxKey_Return) {
+          state->set_consumed(true);
+          state->set_commit("司会");
+          state->set_selected_candidate(0);
+          state->add_candidates()->set_text("は");
+        } else if (expected == ExpectedRequest::Forget) {
+          state->set_consumed(true);
+          state->set_preedit("かな");
+          state->set_preedit_cursor(2);
+          state->set_selected_candidate(0);
+          auto *candidate = state->add_candidates();
+          candidate->set_text("司会");
+          candidate->mutable_composing_count()->set_input(1);
+        } else if (expected == ExpectedRequest::SelectTypo) {
+          state->set_consumed(true);
+          state->set_commit("仮名");
+          state->set_reset(true);
+        } else if (expected != ExpectedRequest::Key) {
+          state->set_consumed(true);
+        }
+      }
+
+      std::string payload;
+      return response.SerializeToString(&payload) &&
+             writeFrame(connection, payload);
+    };
+
+    serverValid = exchange(ExpectedRequest::Start) && serverValid;
+    serverValid = exchange(ExpectedRequest::Key) && serverValid;
+    serverValid = exchange(ExpectedRequest::Forget) && serverValid;
+    serverValid = exchange(ExpectedRequest::Typo) && serverValid;
+    serverValid = exchange(ExpectedRequest::SelectTypo) && serverValid;
+    serverValid = exchange(ExpectedRequest::Key) && serverValid;
+    serverValid = exchange(ExpectedRequest::Key) && serverValid;
+    serverValid = exchange(ExpectedRequest::Key) && serverValid;
+    serverValid = exchange(ExpectedRequest::ResetLearning) && serverValid;
+    close(connection);
+    close(listener);
+  });
+
+  bool valid = true;
+  {
+    char argument0[] = "beankey-engine-test";
+    char argument1[] = "--disable=all";
+    char *arguments[] = {argument0, argument1};
+    fcitx::Instance instance(2, arguments);
+    valid =
+        report(instance.initialized(), "Fcitx instance did not initialize") &&
+        valid;
+    fcitx::BeankeyEngine engine(&instance);
+    TestInputContext inputContext(instance.inputContextManager());
+    inputContext.setCapabilityFlags(fcitx::CapabilityFlag::Preedit);
+    fcitx::InputMethodEntry entry("beankey", "beankey", "ja", "beankey");
+
+    fcitx::FocusInEvent activateEvent(&inputContext);
+    engine.activate(entry, activateEvent);
+    const auto statusActions =
+        inputContext.statusArea().actions(fcitx::StatusGroup::InputMethod);
+    valid = report(statusActions.size() == 1,
+                   "learning reset is not exposed in the Fcitx status area") &&
+            valid;
+    if (!statusActions.empty()) {
+      valid = report(statusActions.front()->shortText(&inputContext) ==
+                         "Reset learning",
+                     "Fcitx learning reset action has the wrong label") &&
+              valid;
+    }
+
+    fcitx::KeyEvent printable(&inputContext, fcitx::Key(FcitxKey_a));
+    engine.keyEvent(entry, printable);
+    valid = report(printable.accepted(),
+                   "consumed printable key was not accepted") &&
+            valid;
+    valid =
+        report(inputContext.inputPanel().clientPreedit().toString() == "かな",
+               "daemon preedit did not reach Fcitx") &&
+        valid;
+    const auto candidates = inputContext.inputPanel().candidateList();
+    valid = report(candidates && candidates->size() == 1,
+                   "daemon candidates did not reach Fcitx") &&
+            valid;
+    auto *actionable = candidates ? candidates->toActionable() : nullptr;
+    valid = report(actionable != nullptr,
+                   "candidate forgetting is not reachable from Fcitx") &&
+            valid;
+    const bool hasForgetAction =
+        actionable != nullptr &&
+        actionable->hasAction(candidates->candidate(0));
+    valid = report(hasForgetAction, "candidate has no Fcitx forget action") &&
+            valid;
+    const auto candidateActions =
+        hasForgetAction ? actionable->candidateActions(candidates->candidate(0))
+                        : std::vector<fcitx::CandidateAction>{};
+    const auto forgetAction = std::find_if(
+        candidateActions.begin(), candidateActions.end(),
+        [](const auto &action) { return action.text() == "Forget"; });
+    const auto typoAction = std::find_if(
+        candidateActions.begin(), candidateActions.end(),
+        [](const auto &action) { return action.text() == "Correct typos"; });
+    valid = report(forgetAction != candidateActions.end(),
+                   "candidate forget action is missing") &&
+            valid;
+    valid = report(typoAction != candidateActions.end(),
+                   "enabled LM typo correction has no candidate action") &&
+            valid;
+    if (forgetAction != candidateActions.end()) {
+      actionable->triggerAction(candidates->candidate(0), forgetAction->id());
+    }
+    if (typoAction != candidateActions.end()) {
+      actionable->triggerAction(candidates->candidate(0), typoAction->id());
+    }
+
+    const auto typoCandidates = inputContext.inputPanel().candidateList();
+    valid =
+        report(typoCandidates && typoCandidates->size() == 1,
+               "LM typo corrections did not reach the Fcitx candidate UI") &&
+        valid;
+    if (typoCandidates && typoCandidates->size() == 1) {
+      valid = report(typoCandidates->candidate(0).text().toString() == "仮名",
+                     "LM typo correction displayed the wrong conversion") &&
+              valid;
+      valid =
+          report(typoCandidates->candidate(0).comment().toString() == "かな",
+                 "LM typo correction omitted the corrected input") &&
+          valid;
+    }
+    fcitx::KeyEvent selectTypo(&inputContext, fcitx::Key(FcitxKey_1));
+    engine.keyEvent(entry, selectTypo);
+    valid = report(selectTypo.accepted(),
+                   "selected LM typo correction was not accepted") &&
+            valid;
+    valid = report(inputContext.committed() == "仮名",
+                   "selected LM typo correction was not committed") &&
+            valid;
+
+    fcitx::KeyEvent printableAgain(&inputContext, fcitx::Key(FcitxKey_a));
+    engine.keyEvent(entry, printableAgain);
+    valid = report(printableAgain.accepted(),
+                   "second consumed printable key was not accepted") &&
+            valid;
+    fcitx::KeyEvent enter(&inputContext, fcitx::Key(FcitxKey_Return));
+    engine.keyEvent(entry, enter);
+    valid =
+        report(enter.accepted(), "consumed Enter was not accepted") && valid;
+    valid = report(inputContext.committed() == "仮名司会",
+                   "daemon commit did not reach Fcitx") &&
+            valid;
+    valid = report(inputContext.inputPanel().clientPreedit().empty(),
+                   "committed preedit was not cleared") &&
+            valid;
+    const auto postCandidates = inputContext.inputPanel().candidateList();
+    valid = report(postCandidates && postCandidates->size() == 1,
+                   "post-composition candidate did not reach Fcitx") &&
+            valid;
+    auto *postActionable =
+        postCandidates ? postCandidates->toActionable() : nullptr;
+    valid = report(postActionable != nullptr,
+                   "post-composition candidate list is not actionable") &&
+            valid;
+    if (postActionable != nullptr) {
+      valid = report(!postActionable->hasAction(postCandidates->candidate(0)),
+                     "post-composition candidate exposes invalid actions") &&
+              valid;
+    }
+
+    fcitx::KeyEvent tab(&inputContext, fcitx::Key(FcitxKey_Tab));
+    engine.keyEvent(entry, tab);
+    valid = report(!tab.accepted(), "unconsumed Tab was accepted") && valid;
+
+    if (!statusActions.empty()) {
+      statusActions.front()->activate(&inputContext);
+    }
+  }
+
+  server.join();
+  valid = report(serverValid, "addon sent an unexpected IPC request") && valid;
+  valid = report(unlink(socketPath.c_str()) == 0,
+                 "failed to remove daemon socket") &&
+          valid;
+  valid = report(rmdir(beankeyDirectory.c_str()) == 0,
+                 "failed to remove beankey runtime directory") &&
+          valid;
+  valid = report(rmdir(runtimeDirectory) == 0,
+                 "failed to remove runtime directory") &&
+          valid;
+  return valid ? 0 : 1;
+}

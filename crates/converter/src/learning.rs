@@ -117,6 +117,7 @@ impl LearningMemory {
             Vec::new()
         };
         if mode.uses_memory() {
+            persisted.retain(|record| valid_learning_entry(&record.entry));
             decay(&mut persisted, today);
         }
         Ok(Self {
@@ -327,6 +328,9 @@ fn join_entries(entries: &[DictionaryEntry]) -> DictionaryEntry {
 }
 
 fn memorize(records: &mut Vec<LearningRecord>, entry: DictionaryEntry, today: u16) {
+    if !valid_learning_entry(&entry) {
+        return;
+    }
     if let Some(record) = records
         .iter_mut()
         .find(|record| same_entry(&record.entry, &entry))
@@ -342,6 +346,10 @@ fn memorize(records: &mut Vec<LearningRecord>, entry: DictionaryEntry, today: u1
             count: 1,
         });
     }
+}
+
+fn valid_learning_entry(entry: &DictionaryEntry) -> bool {
+    !entry.word.chars().any(char::is_control) && !entry.ruby.chars().any(char::is_control)
 }
 
 fn merge_record(records: &mut Vec<LearningRecord>, incoming: LearningRecord) {
@@ -665,6 +673,39 @@ mod tests {
         assert!(disabled.entries().unwrap().is_empty());
         disabled.reset().unwrap();
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn ignores_control_text_in_existing_learning_memory() {
+        let directory = std::env::temp_dir().join(format!(
+            "beankey-control-learning-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        let today = current_day();
+        let records = [("正常", "セイジョウ"), ("\r", "\r"), ("語\t", "ゴ\t")]
+            .into_iter()
+            .map(|(word, ruby)| LearningRecord {
+                entry: entry(word, ruby),
+                last_used_day: today,
+                last_updated_day: today,
+                count: 1,
+            })
+            .collect::<Vec<_>>();
+        fs::write(directory.join(MEMORY_FILE), encode(&records)).unwrap();
+
+        let recovered = LearningMemory::open(&directory, LearningMode::OnlyOutput, 128).unwrap();
+        let entries = recovered.entries().unwrap();
+        fs::remove_dir_all(directory).unwrap();
+
+        assert!(entries.iter().any(|entry| entry.word == "正常"));
+        assert!(entries.iter().all(|entry| {
+            !entry.word.chars().any(char::is_control) && !entry.ruby.chars().any(char::is_control)
+        }));
     }
 
     #[test]
