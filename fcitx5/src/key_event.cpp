@@ -61,6 +61,9 @@ v1::UserAction keyAction(const fcitx::KeyEvent &source) {
   const auto states = source.rawKey().states();
   if (states.test(fcitx::KeyState::Ctrl)) {
     const auto logicalSymbol = source.rawKey().sym();
+    if (logicalSymbol == FcitxKey_u && states.test(fcitx::KeyState::Shift)) {
+      return v1::USER_ACTION_START_UNICODE_INPUT;
+    }
     if (logicalSymbol == FcitxKey_Delete ||
         logicalSymbol == FcitxKey_BackSpace) {
       return v1::USER_ACTION_FORGET;

@@ -405,6 +405,55 @@ fn does_not_turn_control_key_text_into_composition() {
 }
 
 #[test]
+fn enters_and_commits_desktop_unicode_input() {
+    let mut engine = Engine::open(dictionary_root()).unwrap();
+    start_roman_session(&mut engine, 1);
+
+    let entered = response(engine.handle(envelope(
+        2,
+        Payload::KeyEvent(protocol::KeyEvent {
+            action: protocol::UserAction::StartUnicodeInput as i32,
+            ..Default::default()
+        }),
+    )));
+    assert!(entered.consumed);
+    assert_eq!(entered.input_state, protocol::InputState::Unicode as i32);
+    assert_eq!(entered.preedit, "U+");
+
+    let typed = response(engine.handle(envelope(
+        3,
+        Payload::KeyEvent(key_event(0, "1f豆60")),
+    )));
+    assert_eq!(typed.preedit, "U+1f60");
+
+    let committed = response(engine.handle(envelope(
+        4,
+        Payload::KeyEvent(key_event(0xff0d, "\r")),
+    )));
+    assert_eq!(committed.commit, "ὠ");
+    assert!(committed.reset);
+    assert_eq!(committed.input_state, protocol::InputState::None as i32);
+}
+
+#[test]
+fn commits_composition_before_entering_unicode_input() {
+    let mut engine = Engine::open(dictionary_root()).unwrap();
+    start_roman_session(&mut engine, 1);
+    response(engine.handle(envelope(2, Payload::KeyEvent(key_event(0, "kana")))));
+
+    let entered = response(engine.handle(envelope(
+        3,
+        Payload::KeyEvent(protocol::KeyEvent {
+            action: protocol::UserAction::StartUnicodeInput as i32,
+            ..Default::default()
+        }),
+    )));
+    assert_eq!(entered.commit, "かな");
+    assert_eq!(entered.preedit, "U+");
+    assert_eq!(entered.input_state, protocol::InputState::Unicode as i32);
+}
+
+#[test]
 fn edits_active_composition_with_backspace_and_consumes_navigation() {
     let mut engine = Engine::open(dictionary_root()).unwrap();
     start_roman_session(&mut engine, 1);

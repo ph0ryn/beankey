@@ -95,6 +95,19 @@ int main() {
     valid = false;
   }
 
+  fcitx::KeyEvent unicodeSource(
+      nullptr,
+      fcitx::Key(FcitxKey_u,
+                 fcitx::KeyStates{fcitx::KeyState::Ctrl,
+                                  fcitx::KeyState::Shift}));
+  beankey::v1::KeyEvent unicodeTarget;
+  beankey::populateKeyEvent(unicodeSource, &unicodeTarget);
+  if (unicodeTarget.action() !=
+      beankey::v1::USER_ACTION_START_UNICODE_INPUT) {
+    std::cerr << "Control-Shift-U Unicode input was not mapped\n";
+    valid = false;
+  }
+
   fcitx::KeyEvent shiftedSpaceSource(
       nullptr, fcitx::Key(FcitxKey_space, fcitx::KeyState::Shift));
   beankey::v1::KeyEvent shiftedSpaceTarget;

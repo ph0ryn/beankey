@@ -37,6 +37,7 @@ enum InputMode {
     Composing,
     Previewing,
     Selecting,
+    Unicode,
 }
 
 #[derive(Clone, Debug)]
@@ -77,6 +78,7 @@ struct SessionState {
     learning_available: bool,
     learning_writable: bool,
     zenz_cache: zenz::ZenzConversionCache,
+    unicode_input: String,
 }
 
 impl SessionState {
@@ -99,6 +101,7 @@ impl SessionState {
         self.clear_presentation();
         self.typo_corrections.clear();
         self.zenz_cache = zenz::ZenzConversionCache::default();
+        self.unicode_input.clear();
     }
 }
 
@@ -709,6 +712,7 @@ impl Engine {
                         learning_available: self.learning_available,
                         learning_writable: self.learning_writable,
                         zenz_cache: zenz::ZenzConversionCache::default(),
+                        unicode_input: String::new(),
                     },
                 );
                 state_envelope(
@@ -952,6 +956,14 @@ impl Engine {
 
         normalize_input_event(&mut event, self.input_behavior);
 
+        if session.input_mode == InputMode::Unicode {
+            return self.handle_unicode_input(session, action, &event);
+        }
+
+        if action == protocol::UserAction::StartUnicodeInput {
+            return self.enter_unicode_input(session);
+        }
+
         if action == protocol::UserAction::Input
             && session.input_mode == InputMode::Selecting
             && let Some(number) = selection_number(&event.text)
@@ -1016,6 +1028,9 @@ impl Engine {
                     };
                     return Ok(make_state(session, true, String::new(), false));
                 }
+                InputMode::Unicode => {
+                    unreachable!("Unicode input is handled before the main state machine")
+                }
             },
             protocol::UserAction::Enter if session.input_mode != InputMode::None => {
                 if session.input_mode == InputMode::Selecting {
@@ -1065,6 +1080,9 @@ impl Engine {
                     }
                     return Ok(make_state(session, true, String::new(), false));
                 }
+                InputMode::Unicode => {
+                    unreachable!("Unicode input is handled before the main state machine")
+                }
             },
             protocol::UserAction::Down => match session.input_mode {
                 InputMode::Composing | InputMode::Previewing => {
@@ -1085,6 +1103,9 @@ impl Engine {
                     return Ok(make_state(session, true, String::new(), false));
                 }
                 InputMode::None => return Ok(make_state(session, false, String::new(), false)),
+                InputMode::Unicode => {
+                    unreachable!("Unicode input is handled before the main state machine")
+                }
             },
             protocol::UserAction::Up => {
                 if session.input_mode == InputMode::Selecting {
@@ -1248,6 +1269,83 @@ impl Engine {
             _ => {}
         }
         Ok(make_state(session, false, String::new(), false))
+    }
+
+    fn enter_unicode_input(
+        &mut self,
+        session: &mut SessionState,
+    ) -> SessionRequestResult<protocol::StateResponse> {
+        let mut commit = String::new();
+        match session.input_mode {
+            InputMode::None => {}
+            InputMode::Composing | InputMode::Previewing => {
+                commit = current_marked_text(session, &self.tables);
+                self.learn_current_marked_candidate(session, &commit)?;
+                session.reset();
+            }
+            InputMode::Selecting => {
+                let candidate = session
+                    .display_candidates
+                    .get(session.selected_candidate)
+                    .cloned()
+                    .ok_or_else(|| {
+                        (
+                            Code::InvalidPayload,
+                            "selected candidate is outside the current candidates".to_owned(),
+                        )
+                    })?;
+                commit = self.select_and_stage_learning(session, candidate)?;
+                if !session.conversion.composing().is_empty() {
+                    commit.push_str(&session.conversion.composing().surface());
+                }
+                session.reset();
+            }
+            InputMode::Unicode => {}
+        }
+        session.input_mode = InputMode::Unicode;
+        session.unicode_input.clear();
+        Ok(make_state(session, true, commit, false))
+    }
+
+    fn handle_unicode_input(
+        &mut self,
+        session: &mut SessionState,
+        action: protocol::UserAction,
+        event: &protocol::KeyEvent,
+    ) -> SessionRequestResult<protocol::StateResponse> {
+        match action {
+            protocol::UserAction::Input => {
+                session.unicode_input.extend(
+                    event
+                        .input
+                        .to_ascii_lowercase()
+                        .chars()
+                        .filter(char::is_ascii_hexdigit),
+                );
+                Ok(make_state(session, true, String::new(), false))
+            }
+            protocol::UserAction::Backspace => {
+                if session.unicode_input.pop().is_none() {
+                    session.reset();
+                    return Ok(make_state(session, true, String::new(), true));
+                }
+                Ok(make_state(session, true, String::new(), false))
+            }
+            protocol::UserAction::Enter | protocol::UserAction::Space => {
+                let commit = u32::from_str_radix(&session.unicode_input, 16)
+                    .ok()
+                    .and_then(char::from_u32)
+                    .map(|value| value.to_string())
+                    .unwrap_or_default();
+                session.reset();
+                Ok(make_state(session, true, commit, true))
+            }
+            protocol::UserAction::Escape => {
+                session.reset();
+                Ok(make_state(session, true, String::new(), true))
+            }
+            _ => Ok(make_state(session, true, String::new(), false)),
+        }
     }
 
     fn reveal_additional_candidate(&self, session: &mut SessionState) {
@@ -2147,6 +2245,7 @@ fn make_state(
             |candidate| (candidate.text.clone(), 0),
         ),
         InputMode::None => (String::new(), 0),
+        InputMode::Unicode => (format!("U+{}", session.unicode_input), 0),
     };
     let preedit_cursor = preedit.chars().count().min(u32::MAX as usize) as u32;
     let candidate_window = match session.input_mode {
@@ -2204,6 +2303,7 @@ fn make_state(
             InputMode::Composing => protocol::InputState::Composing,
             InputMode::Previewing => protocol::InputState::Previewing,
             InputMode::Selecting => protocol::InputState::Selecting,
+            InputMode::Unicode => protocol::InputState::Unicode,
         } as i32,
         candidate_window: candidate_window as i32,
         highlighted_preedit_length,
