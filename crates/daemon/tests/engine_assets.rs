@@ -1261,6 +1261,87 @@ fn uses_a_json_user_dictionary_with_a_named_custom_input_table() {
 }
 
 #[test]
+fn provides_desktop_and_beankey_product_name_candidates_by_default() {
+    for (reading, expected) in [("あずーきー", "azooKey"), ("びーんきー", "beankey")] {
+        let mut engine = Engine::open(dictionary_root()).unwrap();
+        response(engine.handle(envelope(
+            1,
+            Payload::StartSession(protocol::StartSession {
+                input_style: protocol::InputStyle::Direct as i32,
+                surrounding_text: None,
+                keyboard_language: protocol::KeyboardLanguage::Japanese as i32,
+                custom_input_table: String::new(),
+            }),
+        )));
+
+        let converted = response(engine.handle(envelope(
+            2,
+            Payload::KeyEvent(protocol::KeyEvent {
+                action: protocol::UserAction::Input as i32,
+                text: reading.into(),
+                input: reading.into(),
+                intention: reading.into(),
+                ..Default::default()
+            }),
+        )));
+
+        assert!(
+            converted
+                .candidates
+                .iter()
+                .any(|candidate| candidate.text == expected),
+            "missing {expected} for {reading}"
+        );
+    }
+}
+
+#[test]
+fn keeps_product_name_candidates_when_a_json_dictionary_is_loaded() {
+    let resources = TempDir::new().unwrap();
+    let user_dictionary = resources.path().join("user.json");
+    std::fs::write(
+        &user_dictionary,
+        r#"[{"word":"追加語","reading":"びーんきー","hint":"test"}]"#,
+    )
+    .unwrap();
+    let mut engine = Engine::open_with_conversion_resources(
+        dictionary_root(),
+        &ConversionConfig {
+            user_dictionary: Some(user_dictionary),
+            live_conversion: false,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    response(engine.handle(envelope(
+        1,
+        Payload::StartSession(protocol::StartSession {
+            input_style: protocol::InputStyle::Direct as i32,
+            surrounding_text: None,
+            keyboard_language: protocol::KeyboardLanguage::Japanese as i32,
+            custom_input_table: String::new(),
+        }),
+    )));
+
+    let converted = response(engine.handle(envelope(
+        2,
+        Payload::KeyEvent(protocol::KeyEvent {
+            action: protocol::UserAction::Input as i32,
+            text: "びーんきー".into(),
+            input: "びーんきー".into(),
+            intention: "びーんきー".into(),
+            ..Default::default()
+        }),
+    )));
+    assert!(["beankey", "追加語"].into_iter().all(|expected| {
+        converted
+            .candidates
+            .iter()
+            .any(|candidate| candidate.text == expected)
+    }));
+}
+
+#[test]
 fn applies_conversion_options_and_displays_live_conversion() {
     let mut engine = Engine::open_with_conversion_resources(
         dictionary_root(),

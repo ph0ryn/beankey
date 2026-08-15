@@ -110,6 +110,7 @@ type SessionRequestResult<T> = Result<T, (Code, String)>;
 
 const DESKTOP_PROPER_NOUN_CID: u16 = 1288;
 const DESKTOP_GENERAL_MID: u16 = 501;
+const DESKTOP_USER_DICTIONARY_VALUE: f32 = -5.0;
 
 pub struct Engine {
     dictionary: DictionaryStore,
@@ -290,7 +291,7 @@ impl Engine {
             learning_available: false,
             learning_writable: false,
             text_replacer: None,
-            user_dictionary: Vec::new(),
+            user_dictionary: default_user_dictionary(),
             user_dictionary_directory: None,
             request_options: default_request_options(),
             live_conversion: false,
@@ -434,19 +435,11 @@ impl Engine {
                 })?;
             let items: Vec<UserDictionaryItem> =
                 serde_json::from_str(&source).map_err(ConversionResourceError::UserDictionary)?;
-            self.user_dictionary = items
-                .into_iter()
-                .map(|item| DictionaryEntry {
-                    word: item.word,
-                    ruby: to_katakana(&item.reading),
-                    left_id: DESKTOP_PROPER_NOUN_CID,
-                    right_id: DESKTOP_PROPER_NOUN_CID,
-                    meaning_id: DESKTOP_GENERAL_MID,
-                    base_value: -10.0,
-                    adjustment: 0.0,
-                    metadata: DictionaryMetadata::USER_DICTIONARY,
-                })
-                .collect();
+            self.user_dictionary.extend(
+                items.into_iter().map(|item| {
+                    desktop_user_dictionary_entry(item.word, to_katakana(&item.reading))
+                }),
+            );
         }
         if let Some(path) = &conversion.user_dictionary_directory {
             beankey_converter::UserDictionary::open(path.clone())
@@ -2059,6 +2052,26 @@ fn date_shortcut(
     }
 }
 
+fn default_user_dictionary() -> Vec<DictionaryEntry> {
+    [("azooKey", "アズーキー"), ("beankey", "ビーンキー")]
+        .into_iter()
+        .map(|(word, ruby)| desktop_user_dictionary_entry(word.into(), ruby.into()))
+        .collect()
+}
+
+fn desktop_user_dictionary_entry(word: String, ruby: String) -> DictionaryEntry {
+    DictionaryEntry {
+        word,
+        ruby,
+        left_id: DESKTOP_PROPER_NOUN_CID,
+        right_id: DESKTOP_PROPER_NOUN_CID,
+        meaning_id: DESKTOP_GENERAL_MID,
+        base_value: DESKTOP_USER_DICTIONARY_VALUE,
+        adjustment: 0.0,
+        metadata: DictionaryMetadata::USER_DICTIONARY,
+    }
+}
+
 fn typo_correction_mode(value: TypoCorrectionConfig) -> TypoCorrectionMode {
     match value {
         TypoCorrectionConfig::Enabled => TypoCorrectionMode::Enabled,
@@ -2382,6 +2395,17 @@ mod tests {
             entry.left_id == DESKTOP_PROPER_NOUN_CID
                 && entry.right_id == DESKTOP_PROPER_NOUN_CID
                 && entry.meaning_id == DESKTOP_GENERAL_MID
+        }));
+    }
+
+    #[test]
+    fn uses_the_desktop_score_for_built_in_product_names() {
+        let entries = default_user_dictionary();
+
+        assert_eq!(entries.len(), 2);
+        assert!(entries.iter().all(|entry| {
+            entry.base_value == DESKTOP_USER_DICTIONARY_VALUE
+                && entry.metadata.contains(DictionaryMetadata::USER_DICTIONARY)
         }));
     }
 
