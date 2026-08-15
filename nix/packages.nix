@@ -35,8 +35,8 @@ let
       "beankey-daemon"
     ];
     cargoTestFlags = [
-      "--package"
-      "beankey-daemon"
+      "--workspace"
+      "--all-targets"
     ];
     nativeBuildInputs = [
       pkgs.pkg-config
