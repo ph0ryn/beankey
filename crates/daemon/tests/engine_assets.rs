@@ -509,6 +509,40 @@ fn keeps_composition_when_switching_to_english() {
 }
 
 #[test]
+fn appends_space_to_english_composition_with_and_without_live_conversion() {
+    for live_conversion in [false, true] {
+        let mut engine = Engine::open_with_conversion_resources(
+            dictionary_root(),
+            &ConversionConfig {
+                live_conversion,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        start_roman_session(&mut engine, 1);
+        response(engine.handle(envelope(2, Payload::KeyEvent(key_event(0, "kana")))));
+        response(engine.handle(envelope(
+            3,
+            Payload::KeyEvent(protocol::KeyEvent {
+                action: protocol::UserAction::Eisu as i32,
+                ..Default::default()
+            }),
+        )));
+
+        let spaced = response(engine.handle(envelope(4, Payload::KeyEvent(key_event(0x20, "")))));
+
+        assert!(spaced.consumed);
+        assert_eq!(spaced.preedit, "かな ");
+        assert!(spaced.commit.is_empty());
+        assert_eq!(spaced.input_state, protocol::InputState::Composing as i32);
+        assert_eq!(
+            spaced.candidate_window,
+            protocol::CandidateWindow::Hidden as i32
+        );
+    }
+}
+
+#[test]
 fn edits_active_composition_with_backspace_and_consumes_navigation() {
     let mut engine = Engine::open(dictionary_root()).unwrap();
     start_roman_session(&mut engine, 1);

@@ -989,6 +989,19 @@ impl Engine {
             return Ok(make_state(session, true, String::new(), false));
         }
 
+        if action == protocol::UserAction::Space
+            && session.input_mode == InputMode::Composing
+            && session.input_language == InputLanguage::English
+        {
+            session
+                .conversion
+                .insert_str(" ", ConverterInputStyle::Direct, &self.tables);
+            session.segment_surface_count = None;
+            session.last_was_backspace = false;
+            session.clear_presentation();
+            return Ok(make_state(session, true, String::new(), false));
+        }
+
         if action == protocol::UserAction::Input
             && session.input_mode == InputMode::None
             && session.input_language == InputLanguage::English
@@ -1699,6 +1712,7 @@ impl Engine {
         };
         let live_candidate = if self.live_conversion
             && session.input_mode == InputMode::Composing
+            && session.input_language == InputLanguage::Japanese
             && session.segment_surface_count.is_none()
             && session.conversion.composing().is_at_end()
             && !session.last_was_backspace
@@ -2275,7 +2289,10 @@ fn make_state(
     let preedit_cursor = preedit.chars().count().min(u32::MAX as usize) as u32;
     let candidate_window = match session.input_mode {
         InputMode::Selecting => protocol::CandidateWindow::Selecting,
-        InputMode::Composing if !session.live_conversion_enabled => {
+        InputMode::Composing
+            if session.input_language == InputLanguage::Japanese
+                && !session.live_conversion_enabled =>
+        {
             protocol::CandidateWindow::Preview
         }
         _ => protocol::CandidateWindow::Hidden,
