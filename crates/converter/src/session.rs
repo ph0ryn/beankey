@@ -196,8 +196,12 @@ impl ConversionSession {
         &self.candidates
     }
 
+    pub fn zenz_model_composing(&self) -> &ComposingText {
+        self.full_composing.as_ref().unwrap_or(&self.composing)
+    }
+
     pub fn pending_zenz_suffix_count(&self, tables: &InputTableRegistry) -> usize {
-        predictive_input_source(&self.composing, tables).dropped_suffix_count
+        predictive_input_source(self.zenz_model_composing(), tables).dropped_suffix_count
     }
 
     pub fn begin_segment_request(&mut self, tables: &InputTableRegistry) {
