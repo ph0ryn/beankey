@@ -509,6 +509,25 @@ impl<'a> NormalConverter<'a> {
                     surface_nodes[start].push(node_index);
                 }
             }
+            for entry in single_character_entries(&katakana_graphemes[start]) {
+                let node_index = nodes.len();
+                nodes.push(LatticeNode {
+                    entry,
+                    range: LatticeRange::Surface {
+                        from: start,
+                        to: start + 1,
+                    },
+                    predecessors: if start == 0 {
+                        vec![Predecessor {
+                            path: None,
+                            total: 0.0,
+                        }]
+                    } else {
+                        Vec::new()
+                    },
+                });
+                surface_nodes[start].push(node_index);
+            }
             for entry in modifiers.additional_entries {
                 let ruby_count = UnicodeSegmentation::graphemes(entry.ruby.as_str(), true).count();
                 if ruby_count == 0
@@ -1367,6 +1386,28 @@ fn representation_candidate(
         metadata: Default::default(),
     };
     Candidate::single(word, value, composing_count, 501, vec![entry])
+}
+
+fn single_character_entries(katakana: &str) -> Vec<DictionaryEntry> {
+    let hiragana = to_hiragana(katakana);
+    let words = if hiragana == katakana {
+        vec![(katakana.to_owned(), -14.0)]
+    } else {
+        vec![(hiragana, -13.0), (katakana.to_owned(), -14.0)]
+    };
+    words
+        .into_iter()
+        .map(|(word, value)| DictionaryEntry {
+            word,
+            ruby: katakana.to_owned(),
+            left_id: 1288,
+            right_id: 1288,
+            meaning_id: 501,
+            base_value: value,
+            adjustment: 0.0,
+            metadata: DictionaryMetadata::default(),
+        })
+        .collect()
 }
 
 pub(crate) fn to_full_width(value: &str) -> String {

@@ -1,7 +1,8 @@
 use std::path::PathBuf;
 
 use beankey_converter::{
-    ComposingCount, ComposingText, DictionaryStore, InputStyle, InputTableRegistry, NormalConverter,
+    ComposingCount, ComposingText, ConversionSession, DictionaryStore, InputStyle,
+    InputTableRegistry, NormalConverter, PredictionMode, RequestOptions,
 };
 
 fn dictionary_root() -> PathBuf {
@@ -50,5 +51,91 @@ fn converts_roman_history_through_the_surface_lattice() {
         candidates
             .iter()
             .all(|candidate| candidate.composing_count == ComposingCount::Surface(3))
+    );
+}
+
+#[test]
+fn matches_the_fixed_upstream_must_convert_cases_for_full_and_gradual_input() {
+    let dictionary = DictionaryStore::open(dictionary_root()).unwrap();
+    let converter = NormalConverter::new(&dictionary);
+    let tables = InputTableRegistry::new();
+    let options = RequestOptions {
+        japanese_prediction: PredictionMode::Disabled,
+        ..RequestOptions::default()
+    };
+
+    for (style, cases) in [
+        (
+            InputStyle::Direct,
+            &[
+                ("つかっている", "使っている"),
+                ("しんだどうぶつ", "死んだ動物"),
+                ("けいさん", "計算"),
+                ("azooKeyをつかう", "azooKeyを使う"),
+                ("じどうAIそうじゅう。", "自動AI操縦。"),
+                ("1234567890123456789012", "1234567890123456789012"),
+            ][..],
+        ),
+        (
+            InputStyle::RomanToKana,
+            &[
+                ("tukatteiru", "使っている"),
+                ("sindadoubutu", "死んだ動物"),
+                ("keisann", "計算"),
+            ][..],
+        ),
+    ] {
+        for &(input, expected) in cases {
+            let mut full = ConversionSession::new();
+            full.insert_str(input, style.clone(), &tables);
+            assert_eq!(
+                full.request(&converter, &tables, options.clone())
+                    .unwrap()
+                    .main_results
+                    .first()
+                    .map(|candidate| candidate.text.as_str()),
+                Some(expected),
+                "full conversion for {input}"
+            );
+
+            let mut gradual = ConversionSession::new();
+            let mut result = None;
+            for character in input.chars() {
+                gradual.insert_str(&character.to_string(), style.clone(), &tables);
+                result = Some(
+                    gradual
+                        .request(&converter, &tables, options.clone())
+                        .unwrap(),
+                );
+            }
+            assert_eq!(
+                result
+                    .as_ref()
+                    .and_then(|result| result.main_results.first())
+                    .map(|candidate| candidate.text.as_str()),
+                Some(expected),
+                "gradual conversion for {input}"
+            );
+        }
+    }
+}
+
+#[test]
+fn never_expands_plain_backslash_n_into_a_line_break() {
+    let dictionary = DictionaryStore::open(dictionary_root()).unwrap();
+    let converter = NormalConverter::new(&dictionary);
+    let tables = InputTableRegistry::new();
+    let mut session = ConversionSession::new();
+    session.insert_str("\\n", InputStyle::Direct, &tables);
+
+    let result = session
+        .request(&converter, &tables, RequestOptions::default())
+        .unwrap();
+
+    assert!(
+        result
+            .main_results
+            .iter()
+            .all(|candidate| candidate.text != "\n")
     );
 }
