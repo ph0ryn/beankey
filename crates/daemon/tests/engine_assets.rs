@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use beankey_converter::{ZenzInferenceError, ZenzLanguageModel};
 use beankey_daemon::protocol::envelope::Payload;
@@ -486,6 +488,31 @@ fn follows_the_non_live_desktop_candidate_state_transitions() {
         protocol::InputState::Composing as i32
     );
     assert_eq!(composing_again.preedit, "しかい");
+}
+
+#[test]
+fn resolves_pending_roman_input_before_previewing_candidates() {
+    let mut engine = Engine::open_with_conversion_resources(
+        dictionary_root(),
+        &ConversionConfig {
+            live_conversion: false,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    start_roman_session(&mut engine, 1);
+
+    let composing = response(engine.handle(envelope(2, Payload::KeyEvent(key_event(0, "kan")))));
+    assert_eq!(composing.preedit, "かn");
+
+    let previewing = response(engine.handle(envelope(3, Payload::KeyEvent(key_event(0x20, "")))));
+    assert_eq!(
+        previewing.input_state,
+        protocol::InputState::Previewing as i32
+    );
+
+    let composing = response(engine.handle(envelope(4, Payload::KeyEvent(key_event(0xff1b, "")))));
+    assert_eq!(composing.preedit, "かん");
 }
 
 #[test]
@@ -1235,7 +1262,10 @@ fn rejects_invalid_surrounding_text_and_resets_the_session() {
     );
 }
 
-struct PrefixModel;
+#[derive(Default)]
+struct PrefixModel {
+    token_piece_calls: Option<Arc<AtomicUsize>>,
+}
 
 impl ZenzLanguageModel for PrefixModel {
     fn vocabulary_size(&self) -> usize {
@@ -1257,6 +1287,9 @@ impl ZenzLanguageModel for PrefixModel {
     }
 
     fn token_to_piece(&mut self, token: i32) -> Result<Vec<u8>, ZenzInferenceError> {
+        if let Some(calls) = &self.token_piece_calls {
+            calls.fetch_add(1, Ordering::Relaxed);
+        }
         Ok(if token == 4 {
             "箸".as_bytes().to_vec()
         } else {
@@ -1272,7 +1305,7 @@ impl ZenzLanguageModel for PrefixModel {
 #[test]
 fn applies_zenz_prefix_correction_through_the_session_engine() {
     let mut engine =
-        Engine::open_with_zenz_model(dictionary_root(), Box::new(PrefixModel)).unwrap();
+        Engine::open_with_zenz_model(dictionary_root(), Box::new(PrefixModel::default())).unwrap();
     response(engine.handle(envelope(
         1,
         Payload::StartSession(protocol::StartSession {
@@ -1306,9 +1339,52 @@ fn applies_zenz_prefix_correction_through_the_session_engine() {
 }
 
 #[test]
+fn requests_rich_zenz_candidates_when_candidate_selection_starts() {
+    let token_piece_calls = Arc::new(AtomicUsize::new(0));
+    let model = PrefixModel {
+        token_piece_calls: Some(Arc::clone(&token_piece_calls)),
+    };
+    let mut engine = Engine::open_with_zenz_model(dictionary_root(), Box::new(model)).unwrap();
+    response(engine.handle(envelope(
+        1,
+        Payload::StartSession(protocol::StartSession {
+            input_style: protocol::InputStyle::Direct as i32,
+            surrounding_text: None,
+            keyboard_language: protocol::KeyboardLanguage::Japanese as i32,
+            custom_input_table: String::new(),
+        }),
+    )));
+
+    response(engine.handle(envelope(
+        2,
+        Payload::KeyEvent(protocol::KeyEvent {
+            action: protocol::UserAction::Input as i32,
+            shift: false,
+            text: "はし".into(),
+            surrounding_text: None,
+            input: String::new(),
+            intention: String::new(),
+            option: false,
+        }),
+    )));
+    let calls_before_selection = token_piece_calls.load(Ordering::Relaxed);
+
+    let selecting = response(engine.handle(envelope(3, Payload::KeyEvent(key_event(0xff54, "")))));
+
+    assert_eq!(
+        selecting.input_state,
+        protocol::InputState::Selecting as i32
+    );
+    assert!(
+        token_piece_calls.load(Ordering::Relaxed) >= calls_before_selection + 3,
+        "candidate selection must request the candidate token and rich alternatives"
+    );
+}
+
+#[test]
 fn preserves_special_candidates_after_zenz_conversion() {
     let mut engine =
-        Engine::open_with_zenz_model(dictionary_root(), Box::new(PrefixModel)).unwrap();
+        Engine::open_with_zenz_model(dictionary_root(), Box::new(PrefixModel::default())).unwrap();
     response(engine.handle(envelope(
         1,
         Payload::StartSession(protocol::StartSession {

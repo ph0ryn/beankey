@@ -322,6 +322,30 @@ impl ConversionSession {
         self.last_committed = None;
     }
 
+    pub fn insert_composition_separator(
+        &mut self,
+        input_style: InputStyle,
+        tables: &InputTableRegistry,
+    ) {
+        if self
+            .composing
+            .input()
+            .last()
+            .is_some_and(|element| element.piece == InputPiece::CompositionSeparator)
+        {
+            return;
+        }
+        self.composing.insert(
+            vec![InputElement::new(
+                InputPiece::CompositionSeparator,
+                input_style,
+            )],
+            tables,
+        );
+        self.candidates.clear();
+        self.last_committed = None;
+    }
+
     pub fn delete_backward(&mut self, count: usize, tables: &InputTableRegistry) {
         self.composing.delete_backward(count, tables);
         self.candidates.clear();

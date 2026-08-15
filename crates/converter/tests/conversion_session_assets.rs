@@ -34,6 +34,22 @@ fn transforms_composition_for_the_desktop_function_keys() {
 }
 
 #[test]
+fn resolves_pending_roman_input_at_the_desktop_conversion_boundary() {
+    let tables = InputTableRegistry::new();
+    let mut session = ConversionSession::new();
+    session.insert_str("kan", InputStyle::RomanToKana, &tables);
+    assert_eq!(session.composing().surface(), "かn");
+
+    session.insert_composition_separator(InputStyle::RomanToKana, &tables);
+    assert_eq!(session.composing().surface(), "かん");
+    let input_count = session.composing().input().len();
+
+    session.insert_composition_separator(InputStyle::RomanToKana, &tables);
+    assert_eq!(session.composing().surface(), "かん");
+    assert_eq!(session.composing().input().len(), input_count);
+}
+
+#[test]
 fn selects_and_commits_a_candidate_without_leaking_between_sessions() {
     let dictionary = DictionaryStore::open(dictionary_root()).unwrap();
     let converter = NormalConverter::new(&dictionary);

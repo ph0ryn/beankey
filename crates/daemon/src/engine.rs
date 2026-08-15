@@ -1021,15 +1021,24 @@ impl Engine {
                     return Ok(make_state(session, true, commit, false));
                 }
                 InputMode::Composing => {
+                    session
+                        .conversion
+                        .insert_composition_separator(session.input_style.clone(), &self.tables);
                     session.selected_candidate = 0;
                     session.input_mode = if self.live_conversion {
                         InputMode::Selecting
                     } else {
                         InputMode::Previewing
                     };
+                    if session.input_mode == InputMode::Selecting {
+                        self.request_rich_candidates(session)?;
+                    } else {
+                        self.request_candidates(session)?;
+                    }
                     return Ok(make_state(session, true, String::new(), false));
                 }
                 InputMode::Previewing => {
+                    self.request_rich_candidates(session)?;
                     session.input_mode = InputMode::Selecting;
                     return Ok(make_state(session, true, String::new(), false));
                 }
@@ -1047,6 +1056,10 @@ impl Engine {
             },
             protocol::UserAction::Down => match session.input_mode {
                 InputMode::Composing | InputMode::Previewing => {
+                    session
+                        .conversion
+                        .insert_composition_separator(session.input_style.clone(), &self.tables);
+                    self.request_rich_candidates(session)?;
                     session.input_mode = InputMode::Selecting;
                     session.selected_candidate = 0;
                     return Ok(make_state(session, true, String::new(), false));
@@ -1403,11 +1416,23 @@ impl Engine {
     }
 
     fn request_candidates(&mut self, session: &mut SessionState) -> SessionRequestResult<()> {
+        self.request_candidates_with_richness(session, false)
+    }
+
+    fn request_rich_candidates(&mut self, session: &mut SessionState) -> SessionRequestResult<()> {
+        self.request_candidates_with_richness(session, true)
+    }
+
+    fn request_candidates_with_richness(
+        &mut self,
+        session: &mut SessionState,
+        request_rich_candidates: bool,
+    ) -> SessionRequestResult<()> {
         let segment_request = session.segment_surface_count.is_some();
         if segment_request {
             session.conversion.begin_segment_request(&self.tables);
         }
-        let result = self.request_candidates_for_active_target(session);
+        let result = self.request_candidates_for_active_target(session, request_rich_candidates);
         if segment_request {
             session.conversion.end_segment_request();
             if result.is_ok() {
@@ -1428,6 +1453,7 @@ impl Engine {
     fn request_candidates_for_active_target(
         &mut self,
         session: &mut SessionState,
+        request_rich_candidates: bool,
     ) -> SessionRequestResult<()> {
         session.conversion.refresh_learning().map_err(|error| {
             (
@@ -1446,7 +1472,7 @@ impl Engine {
                 &mut self.zenz_evaluator,
                 zenz::ZenzConversionOptions {
                     version: &version,
-                    request_rich_candidates: self.zenz_rich_candidates,
+                    request_rich_candidates: self.zenz_rich_candidates || request_rich_candidates,
                     inference_limit: self.zenz_inference_limit,
                     personalization: self.zenz_personalization.as_ref(),
                 },
