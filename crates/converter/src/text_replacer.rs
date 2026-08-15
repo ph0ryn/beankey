@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 
 use unicode_segmentation::UnicodeSegmentation;
 
+use crate::kana::to_hiragana;
+
 #[derive(Debug)]
 pub enum TextReplacerError {
     Io { path: PathBuf, source: io::Error },
@@ -178,16 +180,7 @@ fn split_list(value: &str) -> Vec<String> {
 }
 
 fn normalize_query(value: &str) -> String {
-    value
-        .to_lowercase()
-        .chars()
-        .map(|character| match character {
-            '\u{30a1}'..='\u{30f6}' => {
-                char::from_u32(u32::from(character) - 96).expect("hiragana scalar is valid")
-            }
-            _ => character,
-        })
-        .collect()
+    to_hiragana(&value.to_lowercase())
 }
 
 #[cfg(test)]

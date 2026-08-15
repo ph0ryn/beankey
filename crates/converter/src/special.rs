@@ -1,3 +1,4 @@
+use crate::kana::to_katakana;
 use crate::{Candidate, ComposingCount, ComposingText, DictionaryEntry, DictionaryMetadata};
 
 const GENERAL_NOUN_ID: u16 = 1285;
@@ -412,18 +413,6 @@ fn is_english_sentence(value: &str) -> bool {
             character.is_ascii_alphanumeric()
                 || "\n !'_<>[]{}*@`^|~=\"#$%&+(),-./:;?\\’".contains(character)
         })
-}
-
-fn to_katakana(value: &str) -> String {
-    value
-        .chars()
-        .map(|character| match character {
-            '\u{3041}'..='\u{3096}' => {
-                char::from_u32(u32::from(character) + 96).expect("katakana scalar is valid")
-            }
-            _ => character,
-        })
-        .collect()
 }
 
 #[cfg(test)]

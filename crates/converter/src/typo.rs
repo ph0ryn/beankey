@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use unicode_segmentation::UnicodeSegmentation;
 
+use crate::kana::to_katakana;
 use crate::{
     ComposingText, InputElement, InputPiece, InputStyle, InputTableId, InputTableRegistry,
 };
@@ -211,18 +212,6 @@ fn roman_replacement(elements: &[InputElement]) -> Option<&'static str> {
         "pu" => Some("ou"),
         _ => None,
     }
-}
-
-fn to_katakana(value: &str) -> String {
-    value
-        .chars()
-        .map(|character| match character {
-            '\u{3041}'..='\u{3096}' => {
-                char::from_u32(u32::from(character) + 96).expect("katakana scalar is valid")
-            }
-            _ => character,
-        })
-        .collect()
 }
 
 #[cfg(test)]

@@ -6,6 +6,7 @@ use std::sync::Arc;
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::foreign::{ForeignCompletionProvider, foreign_predictions};
+use crate::kana::{to_hiragana, to_katakana};
 use crate::lattice::{to_full_width, to_half_width};
 use crate::{
     Candidate, ComposingCount, ComposingText, ConversionContext, DictionaryEntry, DictionaryError,
@@ -1117,30 +1118,6 @@ fn finalize_candidates(candidates: Vec<Candidate>) -> Vec<Candidate> {
     candidates
         .into_iter()
         .map(Candidate::expand_templates)
-        .collect()
-}
-
-fn to_katakana(value: &str) -> String {
-    value
-        .chars()
-        .map(|character| match character {
-            '\u{3041}'..='\u{3096}' => {
-                char::from_u32(u32::from(character) + 96).expect("katakana scalar is valid")
-            }
-            _ => character,
-        })
-        .collect()
-}
-
-fn to_hiragana(value: &str) -> String {
-    value
-        .chars()
-        .map(|character| match character {
-            '\u{30A1}'..='\u{30F6}' => {
-                char::from_u32(u32::from(character) - 96).expect("hiragana scalar is valid")
-            }
-            _ => character,
-        })
         .collect()
 }
 

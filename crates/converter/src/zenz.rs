@@ -5,6 +5,7 @@ use std::hash::Hash;
 
 use unicode_segmentation::UnicodeSegmentation;
 
+use crate::kana::{to_hiragana, to_katakana};
 use crate::{Candidate, DictionaryMetadata};
 
 const INPUT_TAG: char = '\u{EE00}';
@@ -831,30 +832,6 @@ fn prefix(value: &str, count: usize) -> String {
 fn suffix(value: &str, count: usize) -> String {
     let graphemes = UnicodeSegmentation::graphemes(value, true).collect::<Vec<_>>();
     graphemes[graphemes.len().saturating_sub(count)..].concat()
-}
-
-fn to_katakana(value: &str) -> String {
-    value
-        .chars()
-        .map(|character| match character {
-            '\u{3041}'..='\u{3096}' => {
-                char::from_u32(u32::from(character) + 96).expect("katakana scalar is valid")
-            }
-            _ => character,
-        })
-        .collect()
-}
-
-fn to_hiragana(value: &str) -> String {
-    value
-        .chars()
-        .map(|character| match character {
-            '\u{30A1}'..='\u{30F6}' => {
-                char::from_u32(u32::from(character) - 96).expect("hiragana scalar is valid")
-            }
-            _ => character,
-        })
-        .collect()
 }
 
 #[cfg(test)]

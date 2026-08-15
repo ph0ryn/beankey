@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use unicode_segmentation::UnicodeSegmentation;
 
+use crate::kana::{to_hiragana, to_katakana};
 use crate::{
     ComposingCount, ComposingText, DictionaryEntry, DictionaryError, DictionaryMetadata,
     DictionaryStore, InputTableRegistry, PrefixConstraint,
@@ -1296,18 +1297,6 @@ pub(crate) fn prediction_usable(right_id: u16) -> bool {
         .is_err()
 }
 
-fn to_katakana(value: &str) -> String {
-    value
-        .chars()
-        .map(|character| match character {
-            '\u{3041}'..='\u{3096}' => {
-                char::from_u32(u32::from(character) + 96).expect("katakana scalar is valid")
-            }
-            _ => character,
-        })
-        .collect()
-}
-
 fn enforces_constraint(constraint: &PrefixConstraint, entry: &DictionaryEntry) -> bool {
     !constraint.ignore_memory_and_user_dictionary
         && !entry.metadata.contains(DictionaryMetadata::LEARNED)
@@ -1344,18 +1333,6 @@ fn path_and_word_can_continue(
 
 fn path_satisfies(path: &Arc<RegisteredPath>, constraint: &PrefixConstraint) -> bool {
     constraint.is_satisfied_by(&path_bytes(path))
-}
-
-fn to_hiragana(value: &str) -> String {
-    value
-        .chars()
-        .map(|character| match character {
-            '\u{30A1}'..='\u{30F6}' => {
-                char::from_u32(u32::from(character) - 96).expect("hiragana scalar is valid")
-            }
-            _ => character,
-        })
-        .collect()
 }
 
 fn katakana_score(value: &str) -> f32 {

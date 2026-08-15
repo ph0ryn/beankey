@@ -1,6 +1,7 @@
 mod dictionary;
 mod foreign;
 mod input;
+mod kana;
 mod lattice;
 mod learning;
 mod lm_typo;
@@ -26,6 +27,7 @@ pub use input::{
     FormatSide, InputElement, InputModifier, InputPiece, InputStyle, InputTable,
     InputTableExportError, InputTableId, InputTableRegistry, KeyElement, ValueElement,
 };
+pub use kana::{to_hiragana, to_katakana};
 pub use lattice::{Candidate, CompleteAction, ConversionContext, LatticeRange, NormalConverter};
 pub use learning::{LearningError, LearningMemory, LearningMode};
 pub use lm_typo::{LmTypoCandidate, LmTypoConfig, experimental_typo_correction};

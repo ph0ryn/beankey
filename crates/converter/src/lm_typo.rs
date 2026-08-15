@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use unicode_segmentation::UnicodeSegmentation;
 
+use crate::kana::to_katakana;
 use crate::{
     ComposingText, InputPiece, InputStyle, InputTable, InputTableRegistry, ZenzInferenceError,
     ZenzLanguageModel, ZenzPromptBuilder,
@@ -572,18 +573,6 @@ fn tenkey_neighbors(character: &str) -> Vec<(String, f32)> {
                 .collect()
         })
         .unwrap_or_default()
-}
-
-fn to_katakana(value: &str) -> String {
-    value
-        .chars()
-        .map(|character| match character {
-            '\u{3041}'..='\u{3096}' => {
-                char::from_u32(u32::from(character) + 96).expect("katakana scalar is valid")
-            }
-            _ => character,
-        })
-        .collect()
 }
 
 const MAC_QWERTY: &[(&str, f32, f32)] = &[

@@ -13,7 +13,8 @@ use beankey_converter::{
     KeyboardLanguage, LearningError, LearningMemory, LearningMode, LmTypoConfig, NGramError,
     NGramLanguageModel, NormalConverter, PredictionMode, RequestOptions, SelectionError,
     TextReplacer, TextReplacerError, TypoCorrectionMode, ZenzEvaluator, ZenzLanguageModel,
-    ZenzV3Config, ZenzVersionConfig, experimental_typo_correction, to_full_width,
+    ZenzV3Config, ZenzVersionConfig, experimental_typo_correction, to_full_width, to_hiragana,
+    to_katakana,
 };
 use beankey_llama::LlamaError;
 use serde::Deserialize;
@@ -1781,18 +1782,6 @@ impl PunctuationStyleConfig {
     }
 }
 
-fn to_hiragana(value: &str) -> String {
-    value
-        .chars()
-        .map(|character| match character {
-            '\u{30a1}'..='\u{30f6}' => {
-                char::from_u32(u32::from(character) - 96).expect("hiragana scalar is valid")
-            }
-            _ => character,
-        })
-        .collect()
-}
-
 fn surrounding_context(
     surrounding: Option<&protocol::SurroundingText>,
 ) -> Result<SurroundingContext, String> {
@@ -1903,18 +1892,6 @@ fn typo_correction_mode(value: TypoCorrectionConfig) -> TypoCorrectionMode {
         TypoCorrectionConfig::Automatic => TypoCorrectionMode::Automatic,
         TypoCorrectionConfig::Disabled => TypoCorrectionMode::Disabled,
     }
-}
-
-fn to_katakana(value: &str) -> String {
-    value
-        .chars()
-        .map(|character| match character {
-            '\u{3041}'..='\u{3096}' => {
-                char::from_u32(u32::from(character) + 96).expect("katakana scalar is valid")
-            }
-            _ => character,
-        })
-        .collect()
 }
 
 fn page_candidates(session: &mut SessionState, page: protocol::PageCandidates) -> bool {

@@ -6,7 +6,7 @@ use beankey_converter::{
     Candidate, CandidateEvaluation, ConversionSession, DictionaryError, DictionaryMetadata,
     EfficientNGram, InputTableRegistry, NGramError, NormalConverter, PrefixConstraint,
     ZenzEvaluationRequest, ZenzEvaluator, ZenzInferenceError, ZenzInferenceSequence,
-    ZenzLanguageModel, ZenzPersonalization, ZenzVersionConfig,
+    ZenzLanguageModel, ZenzPersonalization, ZenzVersionConfig, to_katakana,
 };
 use beankey_llama::{LlamaContext, LlamaError, LlamaSequence};
 
@@ -286,18 +286,6 @@ fn candidate_uses_personal_dictionary(candidate: &Candidate) -> bool {
         entry.metadata.contains(DictionaryMetadata::LEARNED)
             || entry.metadata.contains(DictionaryMetadata::USER_DICTIONARY)
     })
-}
-
-fn to_katakana(value: &str) -> String {
-    value
-        .chars()
-        .map(|character| match character {
-            '\u{3041}'..='\u{3096}' => {
-                char::from_u32(u32::from(character) + 96).expect("katakana scalar is valid")
-            }
-            _ => character,
-        })
-        .collect()
 }
 
 #[cfg(test)]

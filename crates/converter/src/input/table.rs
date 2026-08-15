@@ -4,6 +4,7 @@ use std::collections::BTreeSet;
 use unicode_segmentation::UnicodeSegmentation;
 
 use super::roman::DEFAULT_ROMAN_TO_KANA;
+use crate::kana::to_katakana;
 
 pub type Grapheme = String;
 
@@ -311,18 +312,6 @@ impl InputTable {
             resolved_wildcard,
         })
     }
-}
-
-fn to_katakana(value: &str) -> String {
-    value
-        .chars()
-        .map(|character| match character {
-            '\u{3041}'..='\u{3096}' => {
-                char::from_u32(u32::from(character) + 96).expect("katakana scalar is valid")
-            }
-            _ => character,
-        })
-        .collect()
 }
 
 fn piece_matches(expected: &InputPiece, current: &InputPiece, exact_key_count: &mut usize) -> bool {
