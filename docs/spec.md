@@ -3,14 +3,13 @@
 - 文書状態: 実装・正常動作確認済み
 - 作成日: 2026-08-14
 - 関連文書: [architecture.md](./architecture.md)
-- 原作調査: [research.md](./research.md)
 - 原作スナップショット: [`93766c46e31fa6a18b7ced49dab31337780f6f45`](https://github.com/azooKey/AzooKeyKanaKanjiConverter/commit/93766c46e31fa6a18b7ced49dab31337780f6f45)
 
 ## この文書の責任
 
 この文書は、本システムが何を提供するかを定義する。目的、対象範囲、対象外、原作との関係、外部から観測できる要件、完了条件、未決事項を扱う。
 
-採用する言語、コンポーネントの分割、プロセス境界、通信方式などの実現方法は`architecture.md`の責任とする。原作から確認した事実と根拠は`research.md`に置き、この文書では必要な製品要件だけを定義する。
+採用する言語、コンポーネントの分割、プロセス境界、通信方式などの実現方法は`architecture.md`の責任とし、この文書では必要な製品要件だけを定義する。
 
 ## 位置付け
 
@@ -231,7 +230,6 @@ Fcitx5連携はfcitx5-mozcと同様に、daemon応答がconsumedとしたキー�
 
 ## 参考資料
 
-- [原作調査](./research.md)
 - [AzooKeyKanaKanjiConverter固定コミット](https://github.com/azooKey/AzooKeyKanaKanjiConverter/tree/93766c46e31fa6a18b7ced49dab31337780f6f45)
 - [Fcitx5](https://fcitx-im.org/wiki/Fcitx_5)
 - [llama.cpp](https://github.com/ggml-org/llama.cpp)

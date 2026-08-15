@@ -3,14 +3,13 @@
 - 文書状態: 実装・正常動作確認済み
 - 作成日: 2026-08-14
 - 対象仕様: [spec.md](./spec.md)
-- 原作調査: [research.md](./research.md)
 - 原作スナップショット: [`93766c46e31fa6a18b7ced49dab31337780f6f45`](https://github.com/azooKey/AzooKeyKanaKanjiConverter/commit/93766c46e31fa6a18b7ced49dab31337780f6f45)
 
 ## この文書の責任
 
 この文書は、`spec.md`の要件をどの構成で実現するかを定義する。採用する言語、コンポーネントの責任、依存方向、原作互換境界、プロセス境界、データ、NixOSへの組み込み方を扱う。
 
-実装対象に含める機能、現在の正常動作検証、将来の原作適合検証および完了条件は`spec.md`の責任とする。原作から確認した事実と根拠は`research.md`に置き、この文書では実装に必要な設計上の帰結だけを扱う。
+実装対象に含める機能、現在の正常動作検証、将来の原作適合検証および完了条件は`spec.md`の責任とし、この文書では実装に必要な設計上の帰結だけを扱う。
 
 ## 設計の中心
 
@@ -394,7 +393,6 @@ Fcitx5実環境では、通常入力、候補UI、確定、複数input context�
 
 ## 参考資料
 
-- [原作調査](./research.md)
 - [AzooKeyKanaKanjiConverter固定コミット](https://github.com/azooKey/AzooKeyKanaKanjiConverter/tree/93766c46e31fa6a18b7ced49dab31337780f6f45)
 - [Fcitx5の入力メソッド開発ガイド](https://fcitx-im.org/wiki/Develop_an_simple_input_method)
 - [llama.cppのC API](https://github.com/ggml-org/llama.cpp/blob/master/include/llama.h)

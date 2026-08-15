@@ -104,4 +104,3 @@ programs.beankey = {
 
 - [仕様書](docs/spec.md)
 - [アーキテクチャ](docs/architecture.md)
-- [原作調査](docs/research.md)
