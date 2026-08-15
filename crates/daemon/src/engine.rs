@@ -1674,6 +1674,31 @@ impl Engine {
                             model,
                             &version,
                             surrounding.left.as_deref().unwrap_or(""),
+                            |prediction_session, model| {
+                                let mut prediction_cache = zenz::ZenzConversionCache::default();
+                                zenz::convert(
+                                    prediction_session,
+                                    &converter,
+                                    &self.tables,
+                                    model,
+                                    &mut self.zenz_evaluator,
+                                    &mut prediction_cache,
+                                    zenz::ZenzConversionOptions {
+                                        version: &version,
+                                        request_rich_candidates: false,
+                                        inference_limit: self.zenz_inference_limit,
+                                        personalization: self.zenz_personalization.as_ref(),
+                                    },
+                                )
+                                .map_err(|error| match error {
+                                    zenz::ZenzConversionError::Dictionary(error) => {
+                                        beankey_converter::ZenzPredictionError::Dictionary(error)
+                                    }
+                                    zenz::ZenzConversionError::Inference(error) => {
+                                        beankey_converter::ZenzPredictionError::Inference(error)
+                                    }
+                                })
+                            },
                         )
                         .map_err(|error| {
                             (

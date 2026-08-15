@@ -608,16 +608,23 @@ impl ConversionSession {
         Ok((predicted_text, source.dropped_suffix_count))
     }
 
-    pub fn request_zenz_prediction(
+    pub fn request_zenz_prediction<F>(
         &mut self,
         converter: &NormalConverter<'_>,
         tables: &InputTableRegistry,
         model: &mut dyn ZenzLanguageModel,
         version: &ZenzVersionConfig,
         left_context: &str,
-    ) -> Result<Vec<Candidate>, ZenzPredictionError> {
+        mut evaluate_prediction: F,
+    ) -> Result<Vec<Candidate>, ZenzPredictionError>
+    where
+        F: FnMut(
+            &mut ConversionSession,
+            &mut dyn ZenzLanguageModel,
+        ) -> Result<(), ZenzPredictionError>,
+    {
         let additional = self.additional_dictionary();
-        let predictions = self.predictions(converter, tables, 3, &additional)?;
+        let predictions = self.predictions(converter, tables, 5, &additional)?;
         if !predictions.is_empty() {
             return Ok(predictions);
         }
@@ -643,8 +650,13 @@ impl ConversionSession {
         }
         predicted.insert_str(&insert_text, input_style, tables);
         let consumed = self.composing.surface_graphemes().len();
-        Ok(converter
-            .convert_with_entries(&predicted, tables, 1, self.context, &additional)?
+        let mut prediction_session = self.clone();
+        prediction_session.composing = predicted;
+        prediction_session.full_composing = None;
+        prediction_session.candidates.clear();
+        evaluate_prediction(&mut prediction_session, model)?;
+        Ok(prediction_session
+            .candidates
             .into_iter()
             .map(|mut candidate| {
                 candidate.composing_count = ComposingCount::Surface(consumed);

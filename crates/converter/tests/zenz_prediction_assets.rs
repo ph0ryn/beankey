@@ -103,6 +103,7 @@ fn converts_generated_input_when_dictionary_prediction_is_empty() {
     let mut session = ConversionSession::new();
     let mut model = PredictiveModel { evaluations: 0 };
     session.insert_str("あいうえおかきくけこ", InputStyle::Direct, &tables);
+    let mut evaluated_prediction = false;
 
     let predictions = session
         .request_zenz_prediction(
@@ -111,10 +112,21 @@ fn converts_generated_input_when_dictionary_prediction_is_empty() {
             &mut model,
             &ZenzVersionConfig::default(),
             "",
+            |session, _model| {
+                evaluated_prediction = true;
+                session.request_zenz_draft(
+                    &converter,
+                    &tables,
+                    1,
+                    &beankey_converter::PrefixConstraint::default(),
+                )?;
+                Ok(())
+            },
         )
         .unwrap();
 
     assert!(!predictions.is_empty());
+    assert!(evaluated_prediction);
     assert!(model.evaluations > 0);
     assert_eq!(predictions[0].composing_count, ComposingCount::Surface(10));
 }
