@@ -4,7 +4,8 @@ use std::path::PathBuf;
 use beankey_converter::{ZenzInferenceError, ZenzLanguageModel};
 use beankey_daemon::protocol::envelope::Payload;
 use beankey_daemon::{
-    ConversionConfig, ConversionResourceError, Engine, EngineOpenError, PROTOCOL_VERSION, protocol,
+    ConversionConfig, ConversionResourceError, Engine, EngineOpenError, PROTOCOL_VERSION,
+    PunctuationStyleConfig, protocol,
 };
 use tempfile::TempDir;
 
@@ -102,6 +103,114 @@ fn key_event(key_sym: u32, text: &str) -> protocol::KeyEvent {
         input: text.into(),
         intention: text.into(),
         ..Default::default()
+    }
+}
+
+fn configured_engine(config: ConversionConfig) -> Engine {
+    Engine::open_with_conversion_resources(dictionary_root(), &config).unwrap()
+}
+
+#[test]
+fn applies_the_desktop_backslash_preference_and_option_inversion() {
+    for (type_backslash, option, expected) in [
+        (false, false, "¥"),
+        (true, false, "\\"),
+        (false, true, "\\"),
+        (true, true, "¥"),
+    ] {
+        let mut engine = configured_engine(ConversionConfig {
+            type_backslash,
+            ..Default::default()
+        });
+        start_roman_session(&mut engine, 1);
+        let mut event = key_event(0, if option { "" } else { "\\" });
+        event.input = "\\".into();
+        event.intention = "\\".into();
+        event.option = option;
+        let state = response(engine.handle(envelope(2, Payload::KeyEvent(event))));
+        assert_eq!(state.preedit, expected);
+    }
+}
+
+#[test]
+fn inverts_the_idle_space_width_when_half_space_is_enabled() {
+    for (type_half_space, shift, expected) in [
+        (false, false, "　"),
+        (false, true, " "),
+        (true, false, " "),
+        (true, true, "　"),
+    ] {
+        let mut engine = configured_engine(ConversionConfig {
+            type_half_space,
+            ..Default::default()
+        });
+        start_roman_session(&mut engine, 1);
+        let mut event = key_event(0x20, "");
+        event.shift = shift;
+        let state = response(engine.handle(envelope(2, Payload::KeyEvent(event))));
+        assert!(state.consumed);
+        assert_eq!(state.commit, expected);
+    }
+}
+
+#[test]
+fn directly_commits_full_width_text_for_option_input() {
+    let mut engine = configured_engine(ConversionConfig {
+        type_backslash: true,
+        option_direct_full_width_input: true,
+        ..Default::default()
+    });
+    start_roman_session(&mut engine, 1);
+
+    for (request_id, input, expected) in [(2, "a", "ａ"), (3, "¥", "＼"), (4, "-", "－")] {
+        let mut event = key_event(0, "");
+        event.input = input.into();
+        event.intention = input.into();
+        event.option = true;
+        let state = response(engine.handle(envelope(request_id, Payload::KeyEvent(event))));
+        assert!(state.consumed);
+        assert_eq!(state.commit, expected);
+        assert!(state.preedit.is_empty());
+        assert_eq!(state.input_state, protocol::InputState::None as i32);
+    }
+}
+
+#[test]
+fn applies_all_desktop_punctuation_styles_and_option_inversion() {
+    for (style, comma, period) in [
+        (PunctuationStyleConfig::KutenAndToten, "、", "。"),
+        (PunctuationStyleConfig::KutenAndComma, "，", "。"),
+        (PunctuationStyleConfig::PeriodAndToten, "、", "．"),
+        (PunctuationStyleConfig::PeriodAndComma, "，", "．"),
+    ] {
+        let mut engine = configured_engine(ConversionConfig {
+            punctuation_style: style,
+            ..Default::default()
+        });
+        start_roman_session(&mut engine, 1);
+
+        let comma_state =
+            response(engine.handle(envelope(2, Payload::KeyEvent(key_event(0, ",")))));
+        assert_eq!(comma_state.preedit, comma);
+
+        response(engine.handle(envelope(
+            3,
+            Payload::ResetSession(protocol::ResetSession {}),
+        )));
+        let period_state =
+            response(engine.handle(envelope(4, Payload::KeyEvent(key_event(0, ".")))));
+        assert_eq!(period_state.preedit, period);
+
+        response(engine.handle(envelope(
+            5,
+            Payload::ResetSession(protocol::ResetSession {}),
+        )));
+        let mut option_comma = key_event(0, "");
+        option_comma.input = ",".into();
+        option_comma.intention = ",".into();
+        option_comma.option = true;
+        let inverted = response(engine.handle(envelope(6, Payload::KeyEvent(option_comma))));
+        assert_eq!(inverted.preedit, if comma == "、" { "，" } else { "、" });
     }
 }
 
@@ -555,6 +664,7 @@ fn converts_selects_commits_and_resets_a_session() {
             surrounding_text: None,
             input: String::new(),
             intention: String::new(),
+            option: false,
         }),
     )));
     assert!(converted.consumed);
@@ -645,6 +755,7 @@ fn forwards_explicit_kana_key_intention_and_input() {
             surrounding_text: None,
             input: "q".into(),
             intention: "q".into(),
+            option: false,
         }),
     )));
     assert!(converted.consumed);
@@ -1076,6 +1187,7 @@ fn applies_zenz_prefix_correction_through_the_session_engine() {
             surrounding_text: None,
             input: String::new(),
             intention: String::new(),
+            option: false,
         }),
     )));
 
@@ -1111,6 +1223,7 @@ fn preserves_special_candidates_after_zenz_conversion() {
             surrounding_text: None,
             input: String::new(),
             intention: String::new(),
+            option: false,
         }),
     )));
 

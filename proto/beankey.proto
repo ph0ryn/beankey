@@ -67,6 +67,7 @@ message KeyEvent {
   SurroundingText surrounding_text = 4;
   string input = 5;
   string intention = 6;
+  bool option = 7;
 }
 
 message SelectCandidate {

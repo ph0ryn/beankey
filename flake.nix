@@ -334,7 +334,15 @@
             modules = [
               self.nixosModules.default
               {
-                programs.beankey.enable = true;
+                programs.beankey = {
+                  enable = true;
+                  conversion = {
+                    typeBackslash = true;
+                    typeHalfSpace = true;
+                    optionDirectFullWidthInput = true;
+                    punctuationStyle = "period_and_comma";
+                  };
+                };
                 system.stateVersion = "26.05";
               }
             ];
@@ -399,6 +407,10 @@
             grep -F 'full_width_roman = true' "$config"
             grep -F 'half_width_kana = false' "$config"
             grep -F 'live_conversion = true' "$config"
+            grep -F 'type_backslash = true' "$config"
+            grep -F 'type_half_space = true' "$config"
+            grep -F 'option_direct_full_width_input = true' "$config"
+            grep -F 'punctuation_style = "period_and_comma"' "$config"
             grep -F 'mode = "input_and_output"' "$config"
             grep -F 'max_count = 65536' "$config"
             grep -F 'inference_limit = 5' "$config"

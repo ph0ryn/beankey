@@ -55,6 +55,7 @@ fn converts_with_the_fixed_zenz_model_and_llama_backend() {
             surrounding_text: None,
             input: String::new(),
             intention: String::new(),
+            option: false,
         }),
     ));
     let Some(Payload::StateResponse(first)) = first.payload else {
@@ -71,6 +72,7 @@ fn converts_with_the_fixed_zenz_model_and_llama_backend() {
             surrounding_text: None,
             input: String::new(),
             intention: String::new(),
+            option: false,
         }),
     ));
 

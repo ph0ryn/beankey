@@ -93,6 +93,10 @@ let
     typography = cfg.conversion.typography;
     typo_correction = cfg.conversion.typoCorrection;
     live_conversion = cfg.conversion.liveConversion;
+    type_backslash = cfg.conversion.typeBackslash;
+    type_half_space = cfg.conversion.typeHalfSpace;
+    option_direct_full_width_input = cfg.conversion.optionDirectFullWidthInput;
+    punctuation_style = cfg.conversion.punctuationStyle;
     custom_input_tables = lib.mapAttrs (_: value: toString value) cfg.conversion.customInputTables;
   }
   // optionalAttrs (cfg.conversion.customInputTable != null) {
@@ -233,6 +237,31 @@ in
         type = types.bool;
         default = true;
         description = "Whether to display the best exact candidate while composing.";
+      };
+      typeBackslash = mkOption {
+        type = types.bool;
+        default = false;
+        description = "Whether the Yen key inputs a backslash instead of a Yen sign.";
+      };
+      typeHalfSpace = mkOption {
+        type = types.bool;
+        default = false;
+        description = "Whether Space inputs a half-width space and Shift-Space inputs a full-width space.";
+      };
+      optionDirectFullWidthInput = mkOption {
+        type = types.bool;
+        default = false;
+        description = "Whether Alt (Option) directly inputs full-width alphanumeric text when no composition is active.";
+      };
+      punctuationStyle = mkOption {
+        type = types.enum [
+          "kuten_and_toten"
+          "kuten_and_comma"
+          "period_and_toten"
+          "period_and_comma"
+        ];
+        default = "kuten_and_toten";
+        description = "Punctuation pair used for the comma and period keys.";
       };
       userDictionary = absolutePath "Absolute path to a JSON user dictionary.";
       userDictionaryDirectory = absolutePath "Absolute path to an azooKey user dictionary directory.";

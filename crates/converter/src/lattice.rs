@@ -1397,6 +1397,7 @@ pub(crate) fn to_full_width(value: &str) -> String {
         .chars()
         .map(|character| match character {
             ' ' => '\u{3000}',
+            '¥' => '￥',
             '!'..='~' => {
                 char::from_u32(u32::from(character) + 0xfee0).expect("full-width scalar is valid")
             }
@@ -1562,7 +1563,7 @@ mod tests {
 
     #[test]
     fn converts_optional_width_representations() {
-        assert_eq!(to_full_width("ABC 123"), "ＡＢＣ　１２３");
+        assert_eq!(to_full_width("ABC 123 ¥\\"), "ＡＢＣ　１２３　￥＼");
         assert_eq!(to_half_width("ガッツポーズ"), "ｶﾞｯﾂﾎﾟｰｽﾞ");
     }
 }

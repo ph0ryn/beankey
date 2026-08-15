@@ -58,7 +58,7 @@ v1::UserAction shortcutAction(fcitx::KeySym symbol) {
 
 v1::UserAction keyAction(const fcitx::KeyEvent &source) {
   const auto symbol = source.key().sym();
-  const auto states = source.key().states();
+  const auto states = source.rawKey().states();
   if (states.test(fcitx::KeyState::Ctrl)) {
     const auto logicalSymbol = source.rawKey().sym();
     if (logicalSymbol == FcitxKey_Delete ||
@@ -114,10 +114,11 @@ v1::UserAction keyAction(const fcitx::KeyEvent &source) {
 
 void populateKeyEvent(const fcitx::KeyEvent &source, v1::KeyEvent *target) {
   target->set_action(keyAction(source));
-  if (source.key().states().test(fcitx::KeyState::Shift)) {
+  const auto states = source.rawKey().states();
+  if (states.test(fcitx::KeyState::Shift)) {
     target->set_shift(true);
   }
-  if (source.key().states().test(fcitx::KeyState::Ctrl) &&
+  if (states.test(fcitx::KeyState::Ctrl) &&
       (source.rawKey().sym() == FcitxKey_i ||
        source.rawKey().sym() == FcitxKey_o)) {
     target->set_shift(true);
@@ -125,14 +126,20 @@ void populateKeyEvent(const fcitx::KeyEvent &source, v1::KeyEvent *target) {
   const fcitx::KeyStates shortcutModifiers(
       {fcitx::KeyState::Ctrl, fcitx::KeyState::Alt, fcitx::KeyState::Super,
        fcitx::KeyState::Super2, fcitx::KeyState::Hyper, fcitx::KeyState::Meta});
+  const fcitx::KeyStates nonOptionModifiers(
+      {fcitx::KeyState::Ctrl, fcitx::KeyState::Super, fcitx::KeyState::Super2,
+       fcitx::KeyState::Hyper, fcitx::KeyState::Meta});
+  target->set_option(states.test(fcitx::KeyState::Alt) &&
+                     !states.testAny(nonOptionModifiers));
   if (target->action() == v1::USER_ACTION_INPUT &&
-      !source.key().states().testAny(shortcutModifiers)) {
-    target->set_text(
-        japaneseInputText(printableKeyText(source.key().sym())));
+      !states.testAny(shortcutModifiers)) {
+    target->set_text(japaneseInputText(printableKeyText(source.key().sym())));
   }
   const std::string inputText = printableKeyText(source.key().sym());
   const std::string rawText = printableKeyText(source.rawKey().sym());
-  target->set_input(inputText.empty() ? rawText : inputText);
+  target->set_input(target->option() && !target->shift()
+                        ? rawText
+                        : (inputText.empty() ? rawText : inputText));
   target->set_intention(japaneseInputText(rawText));
 }
 

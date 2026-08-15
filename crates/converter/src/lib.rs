@@ -47,3 +47,7 @@ pub use zenz::{
     ZenzPromptBuilder, ZenzV2Config, ZenzV3Config, ZenzVersionConfig, evaluate_candidate,
     generate_next_input,
 };
+
+pub fn to_full_width(value: &str) -> String {
+    lattice::to_full_width(value)
+}

@@ -13,14 +13,15 @@ use beankey_converter::{
     KeyboardLanguage, LearningError, LearningMemory, LearningMode, LmTypoConfig, NGramError,
     NGramLanguageModel, NormalConverter, PredictionMode, RequestOptions, SelectionError,
     TextReplacer, TextReplacerError, TypoCorrectionMode, ZenzEvaluator, ZenzLanguageModel,
-    ZenzV3Config, ZenzVersionConfig, experimental_typo_correction,
+    ZenzV3Config, ZenzVersionConfig, experimental_typo_correction, to_full_width,
 };
 use beankey_llama::LlamaError;
 use serde::Deserialize;
 
 use crate::config::{
     ConversionConfig, DaemonConfig, InputStyleConfig, KeyboardLanguageConfig, LearningConfig,
-    LearningModeConfig, LmTypoLanguageModel, PredictionConfig, TypoCorrectionConfig,
+    LearningModeConfig, LmTypoLanguageModel, PredictionConfig, PunctuationStyleConfig,
+    TypoCorrectionConfig,
 };
 use crate::protocol::composing_count::Count;
 use crate::protocol::envelope::Payload;
@@ -42,6 +43,14 @@ struct InputPrediction {
     display_text: String,
     append_text: String,
     delete_count: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct InputBehavior {
+    type_backslash: bool,
+    type_half_space: bool,
+    option_direct_full_width_input: bool,
+    punctuation_style: PunctuationStyleConfig,
 }
 
 struct SessionState {
@@ -124,6 +133,7 @@ pub struct Engine {
     live_conversion: bool,
     default_input_style: ConverterInputStyle,
     default_keyboard_language: KeyboardLanguage,
+    input_behavior: InputBehavior,
 }
 
 #[derive(Debug)]
@@ -282,6 +292,7 @@ impl Engine {
             live_conversion: false,
             default_input_style: ConverterInputStyle::RomanToKana,
             default_keyboard_language: KeyboardLanguage::Japanese,
+            input_behavior: InputBehavior::default(),
         })
     }
 
@@ -495,6 +506,12 @@ impl Engine {
             KeyboardLanguageConfig::Japanese => KeyboardLanguage::Japanese,
             KeyboardLanguageConfig::EnglishUs => KeyboardLanguage::EnglishUs,
             KeyboardLanguageConfig::Greek => KeyboardLanguage::Greek,
+        };
+        self.input_behavior = InputBehavior {
+            type_backslash: conversion.type_backslash,
+            type_half_space: conversion.type_half_space,
+            option_direct_full_width_input: conversion.option_direct_full_width_input,
+            punctuation_style: conversion.punctuation_style,
         };
         Ok(())
     }
@@ -906,11 +923,22 @@ impl Engine {
     fn handle_key(
         &mut self,
         session: &mut SessionState,
-        event: protocol::KeyEvent,
+        mut event: protocol::KeyEvent,
     ) -> SessionRequestResult<protocol::StateResponse> {
         session.typo_corrections.clear();
         let action = protocol::UserAction::try_from(event.action)
             .unwrap_or(protocol::UserAction::Unspecified);
+
+        if action == protocol::UserAction::Input
+            && session.input_mode == InputMode::None
+            && self.input_behavior.option_direct_full_width_input
+            && event.option
+            && let Some(text) = option_direct_input_text(&event, self.input_behavior.type_backslash)
+        {
+            return Ok(make_state(session, true, text, false));
+        }
+
+        normalize_input_event(&mut event, self.input_behavior);
 
         if action == protocol::UserAction::Input
             && session.input_mode == InputMode::Selecting
@@ -987,7 +1015,8 @@ impl Engine {
             }
             protocol::UserAction::Space => match session.input_mode {
                 InputMode::None => {
-                    let commit = if event.shift { " " } else { "　" }.to_owned();
+                    let full_width = event.shift == self.input_behavior.type_half_space;
+                    let commit = if full_width { "　" } else { " " }.to_owned();
                     return Ok(make_state(session, true, commit, false));
                 }
                 InputMode::Composing => {
@@ -1637,6 +1666,74 @@ fn valid_event_text(event: &protocol::KeyEvent) -> bool {
         && !event.text.chars().any(char::is_control)
         && !event.input.chars().any(char::is_control)
         && !event.intention.chars().any(char::is_control)
+}
+
+fn option_direct_input_text(event: &protocol::KeyEvent, type_backslash: bool) -> Option<String> {
+    let input = if event.input.is_empty() {
+        event.text.as_str()
+    } else {
+        event.input.as_str()
+    };
+    if input.is_empty() || input.chars().any(char::is_control) {
+        return None;
+    }
+    let normalized = match input {
+        "¥" | "\\" if type_backslash => "\\",
+        "¥" | "\\" => "¥",
+        _ => input,
+    };
+    Some(to_full_width(normalized))
+}
+
+fn normalize_input_event(event: &mut protocol::KeyEvent, behavior: InputBehavior) {
+    if protocol::UserAction::try_from(event.action) != Ok(protocol::UserAction::Input) {
+        return;
+    }
+    let logical = if event.intention.is_empty() {
+        event.input.as_str()
+    } else {
+        event.intention.as_str()
+    };
+    let normalized = match logical {
+        "¥" | "\\" if event.shift => Some("|"),
+        "¥" | "\\" if behavior.type_backslash != event.option => Some("\\"),
+        "¥" | "\\" => Some("¥"),
+        "," if !event.shift => Some(behavior.punctuation_style.comma(event.option)),
+        "." if !event.shift => Some(behavior.punctuation_style.period(event.option)),
+        _ => None,
+    };
+    if let Some(normalized) = normalized {
+        event.text = normalized.to_owned();
+        event.intention = normalized.to_owned();
+    }
+}
+
+impl PunctuationStyleConfig {
+    fn comma(self, inverted: bool) -> &'static str {
+        let comma = if matches!(self, Self::KutenAndComma | Self::PeriodAndComma) {
+            "，"
+        } else {
+            "、"
+        };
+        if inverted {
+            if comma == "，" { "、" } else { "，" }
+        } else {
+            comma
+        }
+    }
+
+    fn period(self, inverted: bool) -> &'static str {
+        let period = if matches!(self, Self::PeriodAndToten | Self::PeriodAndComma) {
+            "．"
+        } else {
+            "。"
+        };
+        if inverted {
+            if period == "．" { "。" } else { "．" }
+        } else {
+            period
+        }
+    }
 }
 
 fn to_hiragana(value: &str) -> String {

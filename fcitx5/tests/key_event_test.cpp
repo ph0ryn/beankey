@@ -94,5 +94,38 @@ int main() {
     std::cerr << "Shift-Space semantic action was not mapped\n";
     valid = false;
   }
+
+  fcitx::KeyEvent optionSource(nullptr,
+                               fcitx::Key(FcitxKey_a, fcitx::KeyState::Alt));
+  beankey::v1::KeyEvent optionTarget;
+  beankey::populateKeyEvent(optionSource, &optionTarget);
+  if (optionTarget.action() != beankey::v1::USER_ACTION_INPUT ||
+      !optionTarget.option() || !optionTarget.text().empty() ||
+      optionTarget.input() != "a") {
+    std::cerr << "Alt was not mapped to the semantic Option modifier\n";
+    valid = false;
+  }
+
+  fcitx::KeyEvent shiftedOptionSource(
+      nullptr, fcitx::Key(FcitxKey_a, fcitx::KeyStates{fcitx::KeyState::Shift,
+                                                       fcitx::KeyState::Alt}));
+  beankey::v1::KeyEvent shiftedOptionTarget;
+  beankey::populateKeyEvent(shiftedOptionSource, &shiftedOptionTarget);
+  if (!shiftedOptionTarget.option() || !shiftedOptionTarget.shift() ||
+      shiftedOptionTarget.input() != "A") {
+    std::cerr << "Shift-Alt input lost its shifted printable text\n";
+    valid = false;
+  }
+
+  fcitx::KeyEvent modifiedOptionSource(
+      nullptr,
+      fcitx::Key(FcitxKey_a, fcitx::KeyStates{fcitx::KeyState::Alt,
+                                              fcitx::KeyState::Super}));
+  beankey::v1::KeyEvent modifiedOptionTarget;
+  beankey::populateKeyEvent(modifiedOptionSource, &modifiedOptionTarget);
+  if (modifiedOptionTarget.option()) {
+    std::cerr << "Alt with another shortcut modifier became Option\n";
+    valid = false;
+  }
   return valid ? 0 : 1;
 }

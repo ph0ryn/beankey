@@ -42,6 +42,10 @@ pub struct ConversionConfig {
     pub typography: bool,
     pub typo_correction: TypoCorrectionConfig,
     pub live_conversion: bool,
+    pub type_backslash: bool,
+    pub type_half_space: bool,
+    pub option_direct_full_width_input: bool,
+    pub punctuation_style: PunctuationStyleConfig,
     pub user_dictionary: Option<PathBuf>,
     pub user_dictionary_directory: Option<PathBuf>,
     pub custom_input_tables: BTreeMap<String, PathBuf>,
@@ -86,6 +90,10 @@ impl Default for ConversionConfig {
             typography: false,
             typo_correction: TypoCorrectionConfig::Automatic,
             live_conversion: true,
+            type_backslash: false,
+            type_half_space: false,
+            option_direct_full_width_input: false,
+            punctuation_style: PunctuationStyleConfig::KutenAndToten,
             user_dictionary: None,
             user_dictionary_directory: None,
             custom_input_tables: BTreeMap::new(),
@@ -131,6 +139,16 @@ pub enum TypoCorrectionConfig {
     #[default]
     Automatic,
     Disabled,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum PunctuationStyleConfig {
+    #[default]
+    KutenAndToten,
+    KutenAndComma,
+    PeriodAndToten,
+    PeriodAndComma,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -402,6 +420,10 @@ half_width_kana = false
 typography = false
 typo_correction = "automatic"
 live_conversion = false
+type_backslash = true
+type_half_space = true
+option_direct_full_width_input = true
+punctuation_style = "period_and_comma"
 custom_input_tables = {}
 
 [learning]
@@ -442,6 +464,13 @@ flash_attention = true
             KeyboardLanguageConfig::Japanese
         );
         assert_eq!(config.learning, LearningConfig::default());
+        assert!(config.conversion.type_backslash);
+        assert!(config.conversion.type_half_space);
+        assert!(config.conversion.option_direct_full_width_input);
+        assert_eq!(
+            config.conversion.punctuation_style,
+            PunctuationStyleConfig::PeriodAndComma
+        );
     }
 
     #[test]
