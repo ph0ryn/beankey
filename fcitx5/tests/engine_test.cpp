@@ -202,7 +202,7 @@ int main() {
           return request.has_request_typo_corrections();
         case ExpectedRequest::SelectCandidate:
           return request.has_select_candidate() &&
-                 request.select_candidate().index() == 1;
+                 request.select_candidate().index() == 0;
         case ExpectedRequest::SelectTypo:
           return request.has_select_typo_correction();
         }
@@ -241,16 +241,6 @@ int main() {
           state->mutable_prediction()->set_display_text("今日");
         } else if (expected == ExpectedRequest::Key &&
                    request.key_event().action() ==
-                       beankey::v1::USER_ACTION_PAGE_DOWN) {
-          state->set_consumed(true);
-          state->set_preedit("Candidate 10");
-          state->set_preedit_cursor(12);
-          state->set_highlighted_preedit_length(12);
-          state->set_selected_candidate(9);
-          state->set_candidate_window(beankey::v1::CANDIDATE_WINDOW_SELECTING);
-          addCandidates(state);
-        } else if (expected == ExpectedRequest::Key &&
-                   request.key_event().action() ==
                        beankey::v1::USER_ACTION_UP) {
           state->set_consumed(true);
           state->set_preedit("Candidate 9");
@@ -284,7 +274,7 @@ int main() {
           state->set_reset(true);
         } else if (expected == ExpectedRequest::SelectCandidate) {
           state->set_consumed(true);
-          state->set_commit("Candidate 2");
+          state->set_commit("司会");
           state->set_reset(true);
           state->set_candidate_window(beankey::v1::CANDIDATE_WINDOW_HIDDEN);
         } else if (expected != ExpectedRequest::Key) {
@@ -302,7 +292,6 @@ int main() {
     serverValid = exchange(ExpectedRequest::Forget) && serverValid;
     serverValid = exchange(ExpectedRequest::Typo) && serverValid;
     serverValid = exchange(ExpectedRequest::SelectTypo) && serverValid;
-    serverValid = exchange(ExpectedRequest::Key) && serverValid;
     serverValid = exchange(ExpectedRequest::Key) && serverValid;
     serverValid = exchange(ExpectedRequest::Key) && serverValid;
     serverValid = exchange(ExpectedRequest::SelectCandidate) && serverValid;
@@ -430,9 +419,9 @@ int main() {
             valid;
     fcitx::KeyEvent pageDown(&inputContext, fcitx::Key(FcitxKey_Page_Down));
     engine.keyEvent(entry, pageDown);
-    valid =
-        report(pageDown.accepted(), "consumed Page Down was not accepted") &&
-        valid;
+    valid = report(!pageDown.accepted(),
+                   "unsupported Page Down was consumed by the addon") &&
+            valid;
     const auto secondPage = inputContext.inputPanel().candidateList();
     const auto *pageable = secondPage ? secondPage->toPageable() : nullptr;
     valid = report(pageable && pageable->currentPage() == 0,
@@ -443,15 +432,15 @@ int main() {
             valid;
     if (secondPage && secondPage->size() == 9) {
       valid =
-          report(secondPage->candidate(0).text().toString() == "Candidate 2",
-                 "sliding candidate window has the wrong first candidate") &&
+          report(secondPage->candidate(0).text().toString() == "司会",
+                 "unsupported Page Down changed the first candidate") &&
           valid;
       valid =
-          report(secondPage->candidate(8).text().toString() == "Candidate 10",
-                 "sliding candidate window has the wrong last candidate") &&
+          report(secondPage->candidate(8).text().toString() == "Candidate 9",
+                 "unsupported Page Down changed the last candidate") &&
           valid;
-      valid = report(secondPage->cursorIndex() == 8,
-                     "sliding candidate window has the wrong cursor") &&
+      valid = report(secondPage->cursorIndex() == 0,
+                     "unsupported Page Down changed the cursor") &&
               valid;
     }
     fcitx::KeyEvent up(&inputContext, fcitx::Key(FcitxKey_Up));
@@ -462,11 +451,10 @@ int main() {
                    "candidate window changed size while moving within it") &&
             valid;
     if (retainedWindow && retainedWindow->size() == 9) {
-      valid = report(retainedWindow->candidate(0).text().toString() ==
-                         "Candidate 2",
+      valid = report(retainedWindow->candidate(0).text().toString() == "司会",
                      "candidate window did not preserve its visible start") &&
               valid;
-      valid = report(retainedWindow->cursorIndex() == 7,
+      valid = report(retainedWindow->cursorIndex() == 8,
                      "candidate window did not move its cursor upward") &&
               valid;
     }
@@ -475,7 +463,7 @@ int main() {
     valid = report(selectFirstVisible.accepted(),
                    "first visible candidate selection was not accepted") &&
             valid;
-    valid = report(inputContext.committed() == "仮名Candidate 2",
+    valid = report(inputContext.committed() == "仮名司会",
                    "visible candidate number selected the wrong candidate") &&
             valid;
     valid = report(inputContext.inputPanel().clientPreedit().empty(),

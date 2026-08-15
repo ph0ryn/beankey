@@ -60,6 +60,8 @@ enum UserAction {
   USER_ACTION_HALF_WIDTH_ROMAN = 19;
   USER_ACTION_CONSUME = 20;
   USER_ACTION_START_UNICODE_INPUT = 21;
+  USER_ACTION_EISU = 22;
+  USER_ACTION_KANA = 23;
 }
 
 message KeyEvent {
@@ -136,6 +138,12 @@ enum InputState {
   INPUT_STATE_UNICODE = 5;
 }
 
+enum InputLanguage {
+  INPUT_LANGUAGE_UNSPECIFIED = 0;
+  INPUT_LANGUAGE_JAPANESE = 1;
+  INPUT_LANGUAGE_ENGLISH = 2;
+}
+
 enum CandidateWindow {
   CANDIDATE_WINDOW_UNSPECIFIED = 0;
   CANDIDATE_WINDOW_HIDDEN = 1;
@@ -164,6 +172,7 @@ message StateResponse {
   CandidateWindow candidate_window = 12;
   uint32 highlighted_preedit_length = 13;
   Prediction prediction = 14;
+  InputLanguage input_language = 15;
 }
 
 message TypoCorrectionCandidate {

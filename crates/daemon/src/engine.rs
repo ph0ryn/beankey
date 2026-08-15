@@ -40,6 +40,13 @@ enum InputMode {
     Unicode,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum InputLanguage {
+    #[default]
+    Japanese,
+    English,
+}
+
 #[derive(Clone, Debug)]
 struct InputPrediction {
     display_text: String,
@@ -79,6 +86,7 @@ struct SessionState {
     learning_writable: bool,
     zenz_cache: zenz::ZenzConversionCache,
     unicode_input: String,
+    input_language: InputLanguage,
 }
 
 impl SessionState {
@@ -713,6 +721,7 @@ impl Engine {
                         learning_writable: self.learning_writable,
                         zenz_cache: zenz::ZenzConversionCache::default(),
                         unicode_input: String::new(),
+                        input_language: InputLanguage::Japanese,
                     },
                 );
                 state_envelope(
@@ -964,6 +973,36 @@ impl Engine {
             return self.enter_unicode_input(session);
         }
 
+        if action == protocol::UserAction::Eisu {
+            if session.input_mode == InputMode::Selecting {
+                let mut response = self.select_candidate(session, session.selected_candidate)?;
+                session.input_language = InputLanguage::English;
+                response.input_language = protocol::InputLanguage::English as i32;
+                return Ok(response);
+            }
+            session.input_language = InputLanguage::English;
+            return Ok(make_state(session, true, String::new(), false));
+        }
+
+        if action == protocol::UserAction::Kana {
+            session.input_language = InputLanguage::Japanese;
+            return Ok(make_state(session, true, String::new(), false));
+        }
+
+        if action == protocol::UserAction::Input
+            && session.input_mode == InputMode::None
+            && session.input_language == InputLanguage::English
+        {
+            let input = if event.input.is_empty() {
+                event.text.clone()
+            } else {
+                event.input.clone()
+            };
+            if !input.is_empty() && !input.chars().any(char::is_control) {
+                return Ok(make_state(session, true, input, false));
+            }
+        }
+
         if action == protocol::UserAction::Input
             && session.input_mode == InputMode::Selecting
             && let Some(number) = selection_number(&event.text)
@@ -995,19 +1034,6 @@ impl Engine {
                 self.request_candidates(session)?;
                 // azooKey-Desktop deliberately shows the raw reading immediately after deletion.
                 session.live_candidate = None;
-                return Ok(make_state(session, true, String::new(), false));
-            }
-            protocol::UserAction::DeleteForward if !session.conversion.composing().is_empty() => {
-                session.conversion.delete_forward(1, &self.tables);
-                session.segment_surface_count = None;
-                session.last_was_backspace = false;
-                if session.conversion.composing().is_empty() {
-                    session.reset();
-                    return Ok(make_state(session, true, String::new(), true));
-                }
-                session.input_mode = InputMode::Composing;
-                session.clear_presentation();
-                self.request_candidates(session)?;
                 return Ok(make_state(session, true, String::new(), false));
             }
             protocol::UserAction::Escape => match session.input_mode {
@@ -1043,7 +1069,8 @@ impl Engine {
             }
             protocol::UserAction::Space => match session.input_mode {
                 InputMode::None => {
-                    let full_width = event.shift == self.input_behavior.type_half_space;
+                    let full_width = session.input_language == InputLanguage::Japanese
+                        && event.shift == self.input_behavior.type_half_space;
                     let commit = if full_width { "　" } else { " " }.to_owned();
                     return Ok(make_state(session, true, commit, false));
                 }
@@ -1226,19 +1253,6 @@ impl Engine {
                     .expect("desktop representations have a fixed shape")
                     .0;
                 return self.commit_candidate(session, transformed, InputMode::Selecting);
-            }
-            protocol::UserAction::PageUp | protocol::UserAction::PageDown
-                if session.input_mode == InputMode::Selecting =>
-            {
-                let count = session.display_candidates.len();
-                if count > 0 {
-                    session.selected_candidate = if action == protocol::UserAction::PageUp {
-                        session.selected_candidate.saturating_sub(9)
-                    } else {
-                        (session.selected_candidate + 9).min(count - 1)
-                    };
-                }
-                return Ok(make_state(session, true, String::new(), false));
             }
             protocol::UserAction::Forget if session.input_mode == InputMode::Selecting => {
                 return self.forget_candidate(session, session.selected_candidate);
@@ -1744,6 +1758,17 @@ fn insert_event(
     event: &protocol::KeyEvent,
     tables: &InputTableRegistry,
 ) {
+    if session.input_language == InputLanguage::English {
+        let input = if event.input.is_empty() {
+            event.text.as_str()
+        } else {
+            event.input.as_str()
+        };
+        session
+            .conversion
+            .insert_str(input, ConverterInputStyle::Direct, tables);
+        return;
+    }
     if matches!(session.input_style, ConverterInputStyle::Mapped(_))
         && (!event.input.is_empty() || !event.intention.is_empty())
     {
@@ -2315,6 +2340,10 @@ fn make_state(
                 append_text: prediction.append_text.clone(),
                 delete_count: prediction.delete_count.min(u32::MAX as usize) as u32,
             }),
+        input_language: match session.input_language {
+            InputLanguage::Japanese => protocol::InputLanguage::Japanese,
+            InputLanguage::English => protocol::InputLanguage::English,
+        } as i32,
     }
 }
 

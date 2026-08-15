@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <iostream>
 #include <string_view>
+#include <utility>
 
 #include "beankey.pb.h"
 
@@ -106,6 +107,33 @@ int main() {
       beankey::v1::USER_ACTION_START_UNICODE_INPUT) {
     std::cerr << "Control-Shift-U Unicode input was not mapped\n";
     valid = false;
+  }
+
+  for (const auto &keyCase :
+       {KeyCase{"Delete", FcitxKey_Delete},
+        KeyCase{"Page Up", FcitxKey_Page_Up},
+        KeyCase{"Page Down", FcitxKey_Page_Down}}) {
+    fcitx::KeyEvent source(nullptr, fcitx::Key(keyCase.symbol));
+    beankey::v1::KeyEvent target;
+    beankey::populateKeyEvent(source, &target);
+    if (target.action() != beankey::v1::USER_ACTION_UNSPECIFIED) {
+      std::cerr << keyCase.name << " unsupported action was mapped\n";
+      valid = false;
+    }
+  }
+
+  for (const auto &[symbol, expected] :
+       {std::pair{FcitxKey_Eisu_toggle, beankey::v1::USER_ACTION_EISU},
+        std::pair{FcitxKey_Hiragana_Katakana,
+                  beankey::v1::USER_ACTION_KANA},
+        std::pair{FcitxKey_Kana_Lock, beankey::v1::USER_ACTION_KANA}}) {
+    fcitx::KeyEvent source(nullptr, fcitx::Key(symbol));
+    beankey::v1::KeyEvent target;
+    beankey::populateKeyEvent(source, &target);
+    if (target.action() != expected) {
+      std::cerr << "input language key was not mapped\n";
+      valid = false;
+    }
   }
 
   fcitx::KeyEvent shiftedSpaceSource(

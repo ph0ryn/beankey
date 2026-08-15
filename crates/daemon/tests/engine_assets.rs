@@ -90,7 +90,6 @@ fn key_event(key_sym: u32, text: &str) -> protocol::KeyEvent {
         action: match key_sym {
             0 => protocol::UserAction::Input,
             0xff08 => protocol::UserAction::Backspace,
-            0xffff => protocol::UserAction::DeleteForward,
             0xff0d | 0xff8d => protocol::UserAction::Enter,
             0xff1b => protocol::UserAction::Escape,
             0xff09 | 0xfe20 => protocol::UserAction::Tab,
@@ -420,16 +419,11 @@ fn enters_and_commits_desktop_unicode_input() {
     assert_eq!(entered.input_state, protocol::InputState::Unicode as i32);
     assert_eq!(entered.preedit, "U+");
 
-    let typed = response(engine.handle(envelope(
-        3,
-        Payload::KeyEvent(key_event(0, "1f豆60")),
-    )));
+    let typed = response(engine.handle(envelope(3, Payload::KeyEvent(key_event(0, "1f豆60")))));
     assert_eq!(typed.preedit, "U+1f60");
 
-    let committed = response(engine.handle(envelope(
-        4,
-        Payload::KeyEvent(key_event(0xff0d, "\r")),
-    )));
+    let committed =
+        response(engine.handle(envelope(4, Payload::KeyEvent(key_event(0xff0d, "\r")))));
     assert_eq!(committed.commit, "ὠ");
     assert!(committed.reset);
     assert_eq!(committed.input_state, protocol::InputState::None as i32);
@@ -451,6 +445,67 @@ fn commits_composition_before_entering_unicode_input() {
     assert_eq!(entered.commit, "かな");
     assert_eq!(entered.preedit, "U+");
     assert_eq!(entered.input_state, protocol::InputState::Unicode as i32);
+}
+
+#[test]
+fn switches_desktop_input_language_without_restarting_the_session() {
+    let mut engine = Engine::open(dictionary_root()).unwrap();
+    start_roman_session(&mut engine, 1);
+
+    let english = response(engine.handle(envelope(
+        2,
+        Payload::KeyEvent(protocol::KeyEvent {
+            action: protocol::UserAction::Eisu as i32,
+            ..Default::default()
+        }),
+    )));
+    assert!(english.consumed);
+    assert_eq!(
+        english.input_language,
+        protocol::InputLanguage::English as i32
+    );
+
+    let direct = response(engine.handle(envelope(3, Payload::KeyEvent(key_event(0, "a")))));
+    assert_eq!(direct.commit, "a");
+    assert!(direct.preedit.is_empty());
+
+    let space = response(engine.handle(envelope(4, Payload::KeyEvent(key_event(0x20, "")))));
+    assert_eq!(space.commit, " ");
+
+    let japanese = response(engine.handle(envelope(
+        5,
+        Payload::KeyEvent(protocol::KeyEvent {
+            action: protocol::UserAction::Kana as i32,
+            ..Default::default()
+        }),
+    )));
+    assert_eq!(
+        japanese.input_language,
+        protocol::InputLanguage::Japanese as i32
+    );
+    let composing = response(engine.handle(envelope(6, Payload::KeyEvent(key_event(0, "a")))));
+    assert_eq!(composing.preedit, "あ");
+}
+
+#[test]
+fn keeps_composition_when_switching_to_english() {
+    let mut engine = Engine::open(dictionary_root()).unwrap();
+    start_roman_session(&mut engine, 1);
+    let composing = response(engine.handle(envelope(2, Payload::KeyEvent(key_event(0, "kana")))));
+
+    let switched = response(engine.handle(envelope(
+        3,
+        Payload::KeyEvent(protocol::KeyEvent {
+            action: protocol::UserAction::Eisu as i32,
+            ..Default::default()
+        }),
+    )));
+    assert_eq!(switched.preedit, composing.preedit);
+    assert!(switched.commit.is_empty());
+    assert_eq!(
+        switched.input_language,
+        protocol::InputLanguage::English as i32
+    );
 }
 
 #[test]

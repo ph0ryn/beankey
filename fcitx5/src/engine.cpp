@@ -215,6 +215,9 @@ bool BeankeyState::processKey(KeyEvent &event) {
   auto request = envelope();
   auto *key = request.mutable_key_event();
   beankey::populateKeyEvent(event, key);
+  if (key->action() == beankey::v1::USER_ACTION_UNSPECIFIED) {
+    return false;
+  }
   fillSurroundingText(key->mutable_surrounding_text());
 
   std::vector<beankey::v1::CursorAction> actions;

@@ -75,8 +75,6 @@ v1::UserAction keyAction(const fcitx::KeyEvent &source) {
   switch (symbol) {
   case FcitxKey_BackSpace:
     return v1::USER_ACTION_BACKSPACE;
-  case FcitxKey_Delete:
-    return v1::USER_ACTION_DELETE_FORWARD;
   case FcitxKey_Return:
   case FcitxKey_KP_Enter:
     return v1::USER_ACTION_ENTER;
@@ -95,10 +93,11 @@ v1::UserAction keyAction(const fcitx::KeyEvent &source) {
     return v1::USER_ACTION_UP;
   case FcitxKey_Down:
     return v1::USER_ACTION_DOWN;
-  case FcitxKey_Page_Up:
-    return v1::USER_ACTION_PAGE_UP;
-  case FcitxKey_Page_Down:
-    return v1::USER_ACTION_PAGE_DOWN;
+  case FcitxKey_Eisu_toggle:
+    return v1::USER_ACTION_EISU;
+  case FcitxKey_Hiragana_Katakana:
+  case FcitxKey_Kana_Lock:
+    return v1::USER_ACTION_KANA;
   case FcitxKey_F6:
     return v1::USER_ACTION_HIRAGANA;
   case FcitxKey_F7:
