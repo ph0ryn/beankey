@@ -33,6 +33,7 @@ MVPやv1などの段階的な成果範囲は設けない。確定した実装対
 - Fcitx5から利用できるようにする。
 - Fcitx5との接続、キーconsumed判定および標準UIへの反映はfcitx5-mozcに準拠する。
 - 入力中、先頭候補preview中、候補選択中を区別し、Space、Shift+Space、矢印、Escape、Enter、Tab、数字およびF6からF10の状態遷移を公式azooKey Desktopへ合わせる。
+- 公式azooKey DesktopのAI変換機能だけは、日本語入力に関する観測可能な機能のうち意図的な実装例外とする。
 - Zenzai推論にはllama.cppを使用する。
 - 設定GUIは作らず、NixOS設定を設定の情報源にする。
 - NixOS moduleは`programs.beankey`を公開し、対応する唯一のZenzaiモデルをflake内の`pkgs.fetchurl { url; hash; }`で固定して取得する。
@@ -58,7 +59,8 @@ MVPやv1などの段階的な成果範囲は設けない。確定した実装対
 
 本プロジェクトでは、次を対象外にする。
 
-- azooKey Desktopの設定画面、独自候補ウィンドウ、置換提案、Unicode入力など、Fcitx5日本語入力の中核に含まれないアプリケーション機能
+- 公式azooKey DesktopのAI変換機能。これには、Control+SによるAI置換候補と続きの提案、選択テキストに指示を与えるAI変換、そのprompt入力UI、OpenAI APIおよびApple Foundation Modelsとの通信を含む。これは日本語入力に関する観測可能な原作機能のうち、唯一意図的に実装しない機能である。
+- azooKey Desktopの設定画面および独自候補ウィンドウなど、かな漢字変換とFcitx5標準UIへの写像に含まれないアプリケーション機能
 - Swiftの公開APIとのソース互換またはABI互換
 - macOS向け入力メソッド
 - 原作CLI、辞書生成、N-gram学習および評価など、converter libraryを利用または支援する開発用command
@@ -135,13 +137,15 @@ Zenzaiは単純な候補リランカーとして実装してはならない。�
 
 対応するGGUFモデルは、[Miwa-Keita/zenz-v3.2-small-gguf](https://huggingface.co/Miwa-Keita/zenz-v3.2-small-gguf)のcommit `c67e03e07d215c869f591b274c1631170d3e11fe`にある`ggml-model-Q5_K_M.gguf`だけとする。モデルの差し替えや複数モデルへの対応を要件にしない。context 512 token、batch 512、microbatch 64、flash attention有効を原作準拠の推論プロファイルとし、thread数はNixOS上で利用可能なprocessor数に合わせる。llama.cppのsource revisionは、採用時点の`flake.lock`から一意に決まるものとする。
 
+Zenzaiによるかな漢字変換と、対象外のAI変換を同一機能として扱ってはならない。Zenzaiの固定GGUFモデルをAI置換候補や選択テキスト変換へ流用せず、OpenAI APIまたはApple Foundation Models向けのclient、設定、IPCおよび入力状態を製品へ追加しない。
+
 ### GUIなしでの運用
 
 設定GUIを提供しない。本プロジェクトの設定はNixOS設定から与える。候補表示にはFcitx5の標準機能を使用し、独自の候補ウィンドウを要件にしない。
 
 ### 入力操作と表示
 
-日本語入力は、未入力、入力中、先頭候補preview中、候補選択中を区別する。ライブ変換は既定で有効にし、入力中は最上位の変換結果をプリエディットへ表示して候補一覧を隠す。Backspace直後は読みを表示する。ライブ変換を無効にした場合は入力中に先頭候補だけを標準候補UIへ提示し、最初のSpaceで先頭候補をpreview、次のSpaceで全候補選択へ移る。
+日本語入力は、未入力、入力中、先頭候補preview中、候補選択中およびUnicode入力中を区別する。ライブ変換は既定で有効にし、入力中は最上位の変換結果をプリエディットへ表示して候補一覧を隠す。Backspace直後は読みを表示する。ライブ変換を無効にした場合は入力中に先頭候補だけを標準候補UIへ提示し、最初のSpaceで先頭候補をpreview、次のSpaceで全候補選択へ移る。Control+Shift+Uは現在の入力を必要に応じて確定してUnicode入力へ移り、`U+`に続く16進コードポイントをプリエディットへ表示してEnterまたはSpaceで対応する文字を確定する。
 
 候補選択は先頭候補から開始し、SpaceとDownで次、Shift+SpaceとUpで前へ進む。Escapeは入力を破棄せず、ライブ変換時は入力中へ、非ライブ時は先頭候補previewへ戻す。候補選択中のRightとEnterは選択範囲を確定し、残入力があれば再変換する。1から9は表示中の9件に対応し、0は現在のmarked textを確定して新しい入力として扱う。Tabは入力中に予測を受理し、予測がない場合も入力状態を保ったままconsumedとする。
 
@@ -202,7 +206,7 @@ Fcitx5連携はfcitx5-mozcと同様に、daemon応答がconsumedとしたキー�
 1. 本文書と`architecture.md`の未決事項のうち、実装対象に必要な項目が解決されている。
 2. 固定したソースからNixOS向けパッケージをビルドでき、ビルドおよび実行時クロージャにSwift依存がない。
 3. `programs.beankey.enable = true`によりFcitx5連携、変換デーモン、固定辞書および固定モデルを導入できる。
-4. 固定原作で確認できるかな漢字変換機能をすべて実装し、各機能の代表シナリオで入力、候補、選択、確定、永続化および状態復旧が正常に動作する。
+4. 本文書で唯一の実装例外としたAI変換を除き、固定原作で確認できるかな漢字変換機能をすべて実装し、各機能の代表シナリオで入力、候補、選択、確定、永続化および状態復旧が正常に動作する。
 5. Zenzaiについて、辞書draft、モデル評価、prefix制約付き再探索のループが固定モデルで正常に変換結果を返す。
 6. 確定した実環境でFcitx5から入力、候補選択、確定を行える。
 7. 変換処理または推論を異常終了させても、Fcitx5と対象アプリケーションが異常終了せず、確定した入力保護動作を満たす。
