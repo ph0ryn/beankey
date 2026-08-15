@@ -1103,16 +1103,10 @@ fn does_not_persist_control_key_text_in_learning_memory() {
         response(engine.handle(envelope(3, Payload::KeyEvent(key_event(0xff0d, "")))));
         response(engine.handle(envelope(4, Payload::EndSession(protocol::EndSession {}))));
 
-        assert!(
-            state.path().join("memory.louds").exists(),
-            "{name} did not finish the upstream save transaction"
-        );
         assert_eq!(
-            std::fs::metadata(state.path().join("memory.memorymetadata"))
-                .unwrap()
-                .len(),
-            6,
-            "{name} control text reached persistent learning memory"
+            std::fs::read_dir(state.path()).unwrap().count(),
+            0,
+            "{name} created persistent learning state for control text"
         );
     }
 }
