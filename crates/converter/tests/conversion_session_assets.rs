@@ -2,12 +2,35 @@ use std::path::PathBuf;
 
 use beankey_converter::{
     ConversionSession, DictionaryStore, InputStyle, InputTableRegistry, NormalConverter,
+    TextTransform,
 };
 
 fn dictionary_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .join("data/azooKey_dictionary_storage/Dictionary")
+}
+
+#[test]
+fn transforms_composition_for_the_desktop_function_keys() {
+    let tables = InputTableRegistry::new();
+    let mut session = ConversionSession::new();
+    session.insert_str("gattu", InputStyle::RomanToKana, &tables);
+
+    assert_eq!(session.transformed_text(TextTransform::Hiragana), "がっつ");
+    assert_eq!(session.transformed_text(TextTransform::Katakana), "ガッツ");
+    assert_eq!(
+        session.transformed_text(TextTransform::HalfWidthKatakana),
+        "ｶﾞｯﾂ"
+    );
+    assert_eq!(
+        session.transformed_text(TextTransform::FullWidthRoman),
+        "ｇａｔｔｕ"
+    );
+    assert_eq!(
+        session.transformed_text(TextTransform::HalfWidthRoman),
+        "gattu"
+    );
 }
 
 #[test]

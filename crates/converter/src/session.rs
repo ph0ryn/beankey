@@ -6,6 +6,7 @@ use std::sync::Arc;
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::foreign::{ForeignCompletionProvider, foreign_predictions};
+use crate::lattice::{to_full_width, to_half_width};
 use crate::{
     Candidate, ComposingCount, ComposingText, ConversionContext, DictionaryEntry, DictionaryError,
     DictionaryMetadata, InputElement, InputModifier, InputPiece, InputStyle, InputTableRegistry,
@@ -20,6 +21,15 @@ pub enum PredictionMode {
     Manual,
     #[default]
     Disabled,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TextTransform {
+    Hiragana,
+    Katakana,
+    HalfWidthKatakana,
+    FullWidthRoman,
+    HalfWidthRoman,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -47,8 +57,8 @@ impl Default for RequestOptions {
     fn default() -> Self {
         Self {
             n_best: 10,
-            japanese_prediction: PredictionMode::Automatic,
-            full_width_roman: false,
+            japanese_prediction: PredictionMode::Disabled,
+            full_width_roman: true,
             half_width_kana: false,
             version_string: None,
             typo_correction: TypoCorrectionMode::Automatic,
@@ -65,6 +75,18 @@ pub struct ConversionResult {
     pub prediction_results: Vec<Candidate>,
     pub english_prediction_results: Vec<Candidate>,
     pub first_clause_results: Vec<Candidate>,
+}
+
+impl ConversionResult {
+    pub fn desktop_candidates(&self) -> Vec<Candidate> {
+        let mut seen = std::collections::HashSet::new();
+        self.first_clause_results
+            .iter()
+            .chain(&self.main_results)
+            .filter(|candidate| seen.insert(candidate.text.clone()))
+            .cloned()
+            .collect()
+    }
 }
 
 #[derive(Debug)]
@@ -123,6 +145,7 @@ impl From<LearningError> for SelectionError {
 #[derive(Clone, Default)]
 pub struct ConversionSession {
     composing: ComposingText,
+    full_composing: Option<ComposingText>,
     candidates: Vec<Candidate>,
     context: ConversionContext,
     last_committed: Option<Candidate>,
@@ -170,6 +193,20 @@ impl ConversionSession {
 
     pub fn candidates(&self) -> &[Candidate] {
         &self.candidates
+    }
+
+    pub fn begin_segment_request(&mut self, tables: &InputTableRegistry) {
+        if self.full_composing.is_some() || self.composing.is_at_end() {
+            return;
+        }
+        let target = self.composing.prefix_to_cursor(tables);
+        self.full_composing = Some(std::mem::replace(&mut self.composing, target));
+    }
+
+    pub fn end_segment_request(&mut self) {
+        if let Some(full) = self.full_composing.take() {
+            self.composing = full;
+        }
     }
 
     pub fn import_dynamic_user_dictionary(
@@ -307,6 +344,79 @@ impl ConversionSession {
         self.candidates.clear();
         self.last_committed = None;
         moved
+    }
+
+    pub fn transformed_text(&self, transform: TextTransform) -> String {
+        let surface = self.composing.surface();
+        let raw_input = raw_input(self.composing.input());
+        match transform {
+            TextTransform::Hiragana => to_hiragana(&surface),
+            TextTransform::Katakana => to_katakana(&surface),
+            TextTransform::HalfWidthKatakana => to_half_width(&to_katakana(&surface)),
+            TextTransform::FullWidthRoman => to_full_width(&raw_input),
+            TextTransform::HalfWidthRoman => raw_input,
+        }
+    }
+
+    pub fn desktop_additional_candidates(
+        &self,
+        selected: Option<&Candidate>,
+        tables: &InputTableRegistry,
+    ) -> Vec<(Candidate, &'static str)> {
+        let surface = selected.map_or_else(
+            || self.composing.surface(),
+            |candidate| {
+                candidate
+                    .entries
+                    .iter()
+                    .map(|entry| entry.ruby.as_str())
+                    .collect()
+            },
+        );
+        let composing_count = selected.map_or_else(
+            || ComposingCount::Input(self.composing.input().len()),
+            |candidate| candidate.composing_count.clone(),
+        );
+        let raw_input = selected.map_or_else(
+            || raw_input(self.composing.input()),
+            |candidate| {
+                let mut remaining = self.composing.clone();
+                remaining.complete_prefix(candidate.composing_count.clone(), tables);
+                let consumed = self
+                    .composing
+                    .input()
+                    .len()
+                    .saturating_sub(remaining.input().len());
+                raw_input(&self.composing.input()[..consumed])
+            },
+        );
+        let katakana = to_katakana(&surface);
+        [
+            (raw_input.clone(), "英数"),
+            (to_full_width(&raw_input), "全角英数"),
+            (to_half_width(&katakana), "半角カナ"),
+            (katakana, "カタカナ"),
+            (to_hiragana(&surface), "ひらがな"),
+        ]
+        .into_iter()
+        .map(|(text, annotation)| {
+            let entry = DictionaryEntry {
+                word: text.clone(),
+                ruby: to_katakana(&surface),
+                left_id: 1288,
+                right_id: 1288,
+                meaning_id: 501,
+                base_value: 0.0,
+                adjustment: 0.0,
+                metadata: DictionaryMetadata::default(),
+            };
+            (
+                Candidate::single(text, 0.0, composing_count.clone(), 501, vec![entry])
+                    .with_learning_target(false),
+                annotation,
+            )
+        })
+        .collect()
     }
 
     pub fn request_candidates(
@@ -703,6 +813,14 @@ impl ConversionSession {
                     index,
                     candidate_count: self.candidates.len(),
                 })?;
+        self.select_candidate_value(candidate, tables)
+    }
+
+    pub fn select_candidate_value(
+        &mut self,
+        candidate: Candidate,
+        tables: &InputTableRegistry,
+    ) -> Result<String, SelectionError> {
         self.composing
             .complete_prefix(candidate.composing_count.clone(), tables);
         if let Some(last) = candidate.entries.last() {
@@ -726,6 +844,29 @@ impl ConversionSession {
             self.zenz_prediction_cache = None;
         }
         Ok(candidate.text)
+    }
+
+    pub fn remaining_after_candidate(
+        &self,
+        candidate: &Candidate,
+        tables: &InputTableRegistry,
+    ) -> String {
+        let mut composing = self.composing.clone();
+        composing.complete_prefix(candidate.composing_count.clone(), tables);
+        composing.surface()
+    }
+
+    pub fn consumed_surface_count(
+        &self,
+        candidate: &Candidate,
+        tables: &InputTableRegistry,
+    ) -> usize {
+        let mut composing = self.composing.clone();
+        composing.complete_prefix(candidate.composing_count.clone(), tables);
+        self.composing
+            .surface_graphemes()
+            .len()
+            .saturating_sub(composing.surface_graphemes().len())
     }
 
     pub fn request_post_composition_predictions(
@@ -793,6 +934,17 @@ impl ConversionSession {
         }
         Ok(predictions)
     }
+}
+
+fn raw_input(input: &[InputElement]) -> String {
+    input
+        .iter()
+        .filter_map(|element| match &element.piece {
+            InputPiece::Character(value) => Some(value.as_str()),
+            InputPiece::Key { input, .. } => Some(input.as_str()),
+            InputPiece::CompositionSeparator => None,
+        })
+        .collect()
 }
 
 impl StablePredictionCache {
@@ -1045,5 +1197,34 @@ mod tests {
             }
         );
         assert_eq!(session.composing().surface(), "かな");
+    }
+
+    #[test]
+    fn limits_desktop_representations_to_the_selected_prefix() {
+        let tables = InputTableRegistry::new();
+        let mut session = ConversionSession::new();
+        session.insert_str("kanakana", InputStyle::RomanToKana, &tables);
+        let entry = DictionaryEntry {
+            word: "仮名".into(),
+            ruby: "カナ".into(),
+            left_id: 1288,
+            right_id: 1288,
+            meaning_id: 501,
+            base_value: 0.0,
+            adjustment: 0.0,
+            metadata: DictionaryMetadata::default(),
+        };
+        let selected = Candidate::single(
+            "仮名".into(),
+            0.0,
+            ComposingCount::Input(4),
+            501,
+            vec![entry],
+        );
+
+        let representations = session.desktop_additional_candidates(Some(&selected), &tables);
+        assert_eq!(representations[0].0.text, "kana");
+        assert_eq!(representations[1].0.text, "ｋａｎａ");
+        assert_eq!(representations[4].0.text, "かな");
     }
 }
