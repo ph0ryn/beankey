@@ -558,6 +558,33 @@ fn follows_live_desktop_selection_and_backspace_behavior() {
 }
 
 #[test]
+fn keeps_a_single_character_raw_during_live_conversion() {
+    let mut engine = Engine::open_with_conversion_resources(
+        dictionary_root(),
+        &ConversionConfig {
+            input_style: beankey_daemon::InputStyleConfig::Direct,
+            live_conversion: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    response(engine.handle(envelope(
+        1,
+        Payload::StartSession(protocol::StartSession {
+            input_style: protocol::InputStyle::Direct as i32,
+            surrounding_text: None,
+            keyboard_language: protocol::KeyboardLanguage::Japanese as i32,
+            custom_input_table: String::new(),
+        }),
+    )));
+
+    let composing = response(engine.handle(envelope(2, Payload::KeyEvent(key_event(0, "は")))));
+
+    assert_eq!(composing.preedit, "は");
+    assert_eq!(composing.highlighted_preedit_length, 0);
+}
+
+#[test]
 fn zero_commits_selected_marked_text_and_starts_a_new_composition() {
     let mut engine = Engine::open(dictionary_root()).unwrap();
     start_roman_session(&mut engine, 1);

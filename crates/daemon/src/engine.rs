@@ -1531,6 +1531,17 @@ impl Engine {
                     )
                 })?
         };
+        let live_candidate = if self.live_conversion
+            && session.input_mode == InputMode::Composing
+            && session.segment_surface_count.is_none()
+            && session.conversion.composing().is_at_end()
+            && !session.last_was_backspace
+            && session.conversion.composing().surface_graphemes().len() > 1
+        {
+            result.main_results.first().cloned()
+        } else {
+            None
+        };
         session.display_candidates = if session.segment_surface_count.is_some() {
             result.main_results.clone()
         } else {
@@ -1554,17 +1565,6 @@ impl Engine {
         });
         session.additional_candidate_count = 0;
         session.prediction = input_prediction(session, &result);
-        let live_candidate = if self.live_conversion
-            && session.segment_surface_count.is_none()
-            && session.conversion.composing().is_at_end()
-        {
-            session
-                .conversion
-                .request_live_conversion(&converter, &self.tables)
-                .map_err(|error| (Code::Internal, format!("live conversion failed: {error}")))?
-        } else {
-            None
-        };
         if let Some(live_candidate) = &live_candidate
             && let Some(index) = session.display_candidates.iter().position(|candidate| {
                 candidate.text == live_candidate.text
@@ -1968,12 +1968,7 @@ fn make_state(
         ),
         InputMode::Composing => session.live_candidate.as_ref().map_or_else(
             || (session.conversion.composing().surface(), 0),
-            |candidate| {
-                (
-                    candidate.text.clone(),
-                    candidate.text.chars().count().min(u32::MAX as usize) as u32,
-                )
-            },
+            |candidate| (candidate.text.clone(), 0),
         ),
         InputMode::None => (String::new(), 0),
     };
@@ -2154,11 +2149,49 @@ fn error_envelope(
 
 #[cfg(test)]
 mod tests {
-    use beankey_converter::{ForeignLanguage, ZenzV3Config, ZenzVersionConfig};
+    use beankey_converter::{ForeignLanguage, ZenzInferenceError, ZenzV3Config, ZenzVersionConfig};
 
     use super::*;
 
     struct GreekCompleter;
+
+    struct LivePrefixModel;
+
+    impl ZenzLanguageModel for LivePrefixModel {
+        fn vocabulary_size(&self) -> usize {
+            5
+        }
+
+        fn eos_token(&self) -> i32 {
+            2
+        }
+
+        fn tokenize(
+            &mut self,
+            text: &str,
+            add_special: bool,
+        ) -> Result<Vec<i32>, ZenzInferenceError> {
+            Ok(if add_special {
+                vec![1]
+            } else if text == "箸" {
+                vec![4]
+            } else {
+                vec![3]
+            })
+        }
+
+        fn token_to_piece(&mut self, token: i32) -> Result<Vec<u8>, ZenzInferenceError> {
+            Ok(if token == 4 {
+                "箸".as_bytes().to_vec()
+            } else {
+                b"x".to_vec()
+            })
+        }
+
+        fn next_logits(&mut self, _tokens: &[i32]) -> Result<Vec<f32>, ZenzInferenceError> {
+            Ok(vec![0.0, 0.0, 0.0, 1.0, 10.0])
+        }
+    }
 
     impl ForeignCompletionProvider for GreekCompleter {
         fn completions(&self, language: ForeignLanguage, input: &str) -> Vec<String> {
@@ -2168,6 +2201,47 @@ mod tests {
                 Vec::new()
             }
         }
+    }
+
+    #[test]
+    fn uses_the_finalized_zenz_result_for_live_conversion() {
+        let dictionary = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("data/azooKey_dictionary_storage/Dictionary");
+        let mut engine =
+            Engine::open_with_zenz_model(dictionary, Box::new(LivePrefixModel)).unwrap();
+        engine.live_conversion = true;
+        let envelope = |request_id, payload| protocol::Envelope {
+            protocol_version: PROTOCOL_VERSION,
+            request_id,
+            session_id: "live-zenz".into(),
+            payload: Some(payload),
+            trace: Vec::new(),
+        };
+        engine.handle(envelope(
+            1,
+            Payload::StartSession(protocol::StartSession {
+                input_style: protocol::InputStyle::Direct as i32,
+                surrounding_text: None,
+                keyboard_language: protocol::KeyboardLanguage::Japanese as i32,
+                custom_input_table: String::new(),
+            }),
+        ));
+
+        let response = engine.handle(envelope(
+            2,
+            Payload::KeyEvent(protocol::KeyEvent {
+                action: protocol::UserAction::Input as i32,
+                text: "はし".into(),
+                ..Default::default()
+            }),
+        ));
+        let Payload::StateResponse(state) = response.payload.unwrap() else {
+            panic!("conversion did not return state");
+        };
+
+        assert_eq!(state.preedit, "箸");
+        assert_eq!(state.highlighted_preedit_length, 0);
     }
 
     #[test]

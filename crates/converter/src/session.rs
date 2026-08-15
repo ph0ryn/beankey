@@ -645,19 +645,6 @@ impl ConversionSession {
             .collect())
     }
 
-    pub fn request_live_conversion(
-        &self,
-        converter: &NormalConverter<'_>,
-        tables: &InputTableRegistry,
-    ) -> Result<Option<Candidate>, DictionaryError> {
-        let additional = self.additional_dictionary();
-        Ok(converter
-            .convert_with_entries(&self.composing, tables, 1, self.context, &additional)?
-            .into_iter()
-            .next()
-            .map(Candidate::expand_templates))
-    }
-
     pub fn request(
         &mut self,
         converter: &NormalConverter<'_>,
