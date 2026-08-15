@@ -1176,6 +1176,25 @@ mod tests {
         Candidate::single(text.into(), 0.0, composing_count, 501, Vec::new())
     }
 
+    fn prediction_candidate(text: &str, composing_count: ComposingCount) -> Candidate {
+        Candidate::single(
+            text.into(),
+            0.0,
+            composing_count,
+            501,
+            vec![DictionaryEntry {
+                word: text.into(),
+                ruby: to_katakana(text),
+                left_id: 1288,
+                right_id: 1288,
+                meaning_id: 501,
+                base_value: 0.0,
+                adjustment: 0.0,
+                metadata: DictionaryMetadata::default(),
+            }],
+        )
+    }
+
     #[test]
     fn editing_invalidates_candidates_and_reset_clears_composition() {
         let tables = InputTableRegistry::new();
@@ -1269,6 +1288,120 @@ mod tests {
         assert_eq!(
             session.desktop_candidates(&result, &tables),
             vec![first_clause, main]
+        );
+    }
+
+    #[test]
+    fn zenz_prediction_cache_returns_only_the_unconsumed_direct_suffix() {
+        let cache = ZenzPredictionCache {
+            left_context: "左文脈".into(),
+            version: ZenzVersionConfig::default(),
+            input_style: InputStyle::Direct,
+            original_surface: "あ".into(),
+            suffix_count: 0,
+            predicted_text: "いうえお".into(),
+        };
+        let tables = InputTableRegistry::new();
+        let mut composing = ComposingText::new();
+        composing.insert_str("あい", InputStyle::Direct, &tables);
+        assert_eq!(
+            cache.remaining_prediction(&composing, 10),
+            Some("うえお".into())
+        );
+
+        composing.insert_str("う", InputStyle::Direct, &tables);
+        assert_eq!(cache.remaining_prediction(&composing, 1), Some("え".into()));
+    }
+
+    #[test]
+    fn zenz_prediction_cache_handles_roman_input_and_rejects_divergence() {
+        let roman = ZenzPredictionCache {
+            left_context: String::new(),
+            version: ZenzVersionConfig::default(),
+            input_style: InputStyle::RomanToKana,
+            original_surface: "k".into(),
+            suffix_count: 1,
+            predicted_text: "カナ".into(),
+        };
+        let tables = InputTableRegistry::new();
+        let mut composing = ComposingText::new();
+        composing.insert_str("ka", InputStyle::RomanToKana, &tables);
+        assert_eq!(
+            roman.remaining_prediction(&composing, 10),
+            Some("ナ".into())
+        );
+        composing.insert_str("na", InputStyle::RomanToKana, &tables);
+        assert_eq!(roman.remaining_prediction(&composing, 10), None);
+
+        let direct = ZenzPredictionCache {
+            input_style: InputStyle::Direct,
+            original_surface: "あ".into(),
+            suffix_count: 0,
+            predicted_text: "いう".into(),
+            ..roman
+        };
+        let mut diverged = ComposingText::new();
+        diverged.insert_str("あか", InputStyle::Direct, &tables);
+        assert_eq!(direct.remaining_prediction(&diverged, 10), None);
+    }
+
+    #[test]
+    fn stable_prediction_cache_keeps_only_prefix_compatible_candidates() {
+        let cache = StablePredictionCache {
+            original_surface: "あいうえおかきくk".into(),
+            suffix_count: 1,
+            candidates: vec![
+                prediction_candidate("あいうえおかきくけこ", ComposingCount::Surface(9)),
+                prediction_candidate("あいうえおかきくけど", ComposingCount::Surface(9)),
+                prediction_candidate("別候補", ComposingCount::Surface(3)),
+            ],
+        };
+        let tables = InputTableRegistry::new();
+        let mut composing = ComposingText::new();
+        composing.insert_str("あいうえおかきくけ", InputStyle::Direct, &tables);
+        let source = PredictiveInputSource {
+            base_surface: composing.surface(),
+            possible_nexts: Vec::new(),
+            dropped_suffix_count: 0,
+        };
+
+        assert_eq!(
+            cache
+                .compatible_candidates(&composing, &source)
+                .into_iter()
+                .map(|candidate| candidate.text)
+                .collect::<Vec<_>>(),
+            ["あいうえおかきくけこ", "あいうえおかきくけど"]
+        );
+    }
+
+    #[test]
+    fn stable_prediction_cache_uses_roman_possible_nexts_and_updates_consumed_count() {
+        let cache = StablePredictionCache {
+            original_surface: "あいうえおかきくけ".into(),
+            suffix_count: 0,
+            candidates: vec![
+                prediction_candidate("あいうえおかきくけこ", ComposingCount::Surface(9)),
+                prediction_candidate("あいうえおかきくけど", ComposingCount::Surface(9)),
+            ],
+        };
+        let tables = InputTableRegistry::new();
+        let mut composing = ComposingText::new();
+        composing.insert_str("あいうえおかきくけ", InputStyle::Direct, &tables);
+        composing.insert_str("k", InputStyle::RomanToKana, &tables);
+        let source = predictive_input_source(&composing, &tables);
+        let compatible = cache.compatible_candidates(&composing, &source);
+
+        assert_eq!(
+            compatible
+                .iter()
+                .map(|candidate| candidate.text.as_str())
+                .collect::<Vec<_>>(),
+            ["あいうえおかきくけこ"]
+        );
+        assert_eq!(
+            compatible[0].composing_count,
+            ComposingCount::Surface(composing.surface_graphemes().len())
         );
     }
 }
