@@ -4,6 +4,8 @@
 }:
 
 let
+  version = (builtins.fromTOML (builtins.readFile ../Cargo.toml)).workspace.package.version;
+
   sourceFor =
     roots:
     pkgs.lib.cleanSourceWith {
@@ -18,7 +20,7 @@ let
 
   daemon = pkgs.rustPlatform.buildRustPackage {
     pname = "beankey-daemon";
-    version = "0.1.0";
+    inherit version;
     src = sourceFor [
       "Cargo.lock"
       "Cargo.toml"
@@ -71,7 +73,7 @@ in
 
   fcitx5-addon = pkgs.stdenv.mkDerivation {
     pname = "fcitx5-beankey";
-    version = "0.1.0";
+    inherit version;
     src = sourceFor [
       "LICENSE"
       "fcitx5"
