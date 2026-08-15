@@ -255,16 +255,15 @@ impl LearningMemory {
 
     pub fn commit(&self) -> Result<bool, LearningError> {
         let mut state = self.lock()?;
-        if !state.mode.updates_memory() {
+        if !state.mode.updates_memory() || state.temporary.is_empty() {
             return Ok(false);
         }
-        let changed = !state.temporary.is_empty();
         let temporary = std::mem::take(&mut state.temporary);
         for record in temporary {
             merge_record(&mut state.persisted, record);
         }
         save_locked(&mut state)?;
-        Ok(changed)
+        Ok(true)
     }
 
     pub fn reset(&self) -> Result<(), LearningError> {
@@ -957,6 +956,58 @@ mod tests {
         disabled.learn(&candidate).unwrap();
         assert!(!disabled.commit().unwrap());
         assert!(disabled.entries().unwrap().is_empty());
+    }
+
+    #[test]
+    fn commit_without_pending_learning_does_not_create_memory_files() {
+        let directory = temporary_directory("learning-empty-commit");
+        let memory = LearningMemory::open(
+            &directory,
+            LearningMode::InputAndOutput,
+            128,
+            character_ids(),
+        )
+        .unwrap();
+
+        assert!(!memory.commit().unwrap());
+        assert_eq!(fs::read_dir(&directory).unwrap().count(), 0);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn opening_memory_recovers_and_clears_an_upstream_pause_marker() {
+        let directory = temporary_directory("learning-pause-recovery");
+        let memory = LearningMemory::open(
+            &directory,
+            LearningMode::InputAndOutput,
+            128,
+            character_ids(),
+        )
+        .unwrap();
+        let candidate = Candidate::single(
+            "テスト".into(),
+            -10.0,
+            crate::ComposingCount::Surface(3),
+            501,
+            vec![entry("テスト", "テスト")],
+        );
+        memory.learn(&candidate).unwrap();
+        assert!(memory.commit().unwrap());
+        fs::write(directory.join(PAUSE_FILE), []).unwrap();
+
+        let recovered =
+            LearningMemory::open(&directory, LearningMode::OnlyOutput, 128, character_ids())
+                .unwrap();
+
+        assert!(!directory.join(PAUSE_FILE).exists());
+        assert!(
+            recovered
+                .entries()
+                .unwrap()
+                .iter()
+                .any(|entry| entry.word == "テスト")
+        );
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
