@@ -1596,7 +1596,7 @@ impl Engine {
         session.display_candidates = if session.segment_surface_count.is_some() {
             result.main_results.clone()
         } else {
-            result.desktop_candidates()
+            session.conversion.desktop_candidates(&result, &self.tables)
         };
         session.candidate_remainders = session
             .display_candidates
@@ -1608,12 +1608,21 @@ impl Engine {
             })
             .collect();
         session.candidate_annotations = vec![String::new(); session.display_candidates.len()];
-        session.preview_candidate_index = result.main_results.first().and_then(|preview| {
-            session.display_candidates.iter().position(|candidate| {
-                candidate.text == preview.text
-                    && candidate.composing_count == preview.composing_count
+        session.preview_candidate_index = result
+            .main_results
+            .first()
+            .filter(|preview| {
+                session
+                    .conversion
+                    .remaining_after_candidate(preview, &self.tables)
+                    .is_empty()
             })
-        });
+            .and_then(|preview| {
+                session.display_candidates.iter().position(|candidate| {
+                    candidate.text == preview.text
+                        && candidate.composing_count == preview.composing_count
+                })
+            });
         session.additional_candidate_count = 0;
         session.prediction = input_prediction(session, &result);
         if let Some(live_candidate) = &live_candidate
@@ -1665,10 +1674,17 @@ fn selection_number(text: &str) -> Option<usize> {
 }
 
 fn current_marked_text(session: &SessionState, _tables: &InputTableRegistry) -> String {
-    if matches!(
-        session.input_mode,
-        InputMode::Previewing | InputMode::Selecting
-    ) && let Some(candidate) = session.display_candidates.get(session.selected_candidate)
+    if session.input_mode == InputMode::Previewing {
+        return session
+            .preview_candidate_index
+            .and_then(|index| session.display_candidates.get(index))
+            .map_or_else(
+                || session.conversion.composing().surface(),
+                |candidate| candidate.text.clone(),
+            );
+    }
+    if session.input_mode == InputMode::Selecting
+        && let Some(candidate) = session.display_candidates.get(session.selected_candidate)
     {
         let remaining = session
             .candidate_remainders
@@ -2071,20 +2087,29 @@ fn make_state(
     commit: String,
     reset: bool,
 ) -> protocol::StateResponse {
-    let selected = session.display_candidates.get(session.selected_candidate);
     let (preedit, highlighted_preedit_length) = match session.input_mode {
-        InputMode::Previewing | InputMode::Selecting => selected.map_or_else(
-            || (session.conversion.composing().surface(), 0),
-            |candidate| {
-                let remaining = session
-                    .candidate_remainders
-                    .get(session.selected_candidate)
-                    .map(String::as_str)
-                    .unwrap_or("");
-                let highlighted = candidate.text.chars().count().min(u32::MAX as usize) as u32;
-                (format!("{}{remaining}", candidate.text), highlighted)
-            },
-        ),
+        InputMode::Previewing => session
+            .preview_candidate_index
+            .and_then(|index| session.display_candidates.get(index))
+            .map_or_else(
+                || (session.conversion.composing().surface(), 0),
+                |candidate| (candidate.text.clone(), 0),
+            ),
+        InputMode::Selecting => session
+            .display_candidates
+            .get(session.selected_candidate)
+            .map_or_else(
+                || (session.conversion.composing().surface(), 0),
+                |candidate| {
+                    let remaining = session
+                        .candidate_remainders
+                        .get(session.selected_candidate)
+                        .map(String::as_str)
+                        .unwrap_or("");
+                    let highlighted = candidate.text.chars().count().min(u32::MAX as usize) as u32;
+                    (format!("{}{remaining}", candidate.text), highlighted)
+                },
+            ),
         InputMode::Composing => session.live_candidate.as_ref().map_or_else(
             || (session.conversion.composing().surface(), 0),
             |candidate| (candidate.text.clone(), 0),

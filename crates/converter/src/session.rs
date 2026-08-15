@@ -79,7 +79,7 @@ pub struct ConversionResult {
 }
 
 impl ConversionResult {
-    pub fn desktop_candidates(&self) -> Vec<Candidate> {
+    fn merged_desktop_candidates(&self) -> Vec<Candidate> {
         let mut seen = std::collections::HashSet::new();
         self.first_clause_results
             .iter()
@@ -868,6 +868,22 @@ impl ConversionSession {
         composing.surface()
     }
 
+    pub fn desktop_candidates(
+        &self,
+        result: &ConversionResult,
+        tables: &InputTableRegistry,
+    ) -> Vec<Candidate> {
+        if result
+            .first_clause_results
+            .iter()
+            .any(|candidate| self.remaining_after_candidate(candidate, tables).is_empty())
+        {
+            result.main_results.clone()
+        } else {
+            result.merged_desktop_candidates()
+        }
+    }
+
     pub fn consumed_surface_count(
         &self,
         candidate: &Candidate,
@@ -1156,6 +1172,10 @@ fn unique(candidates: Vec<Candidate>) -> Vec<Candidate> {
 mod tests {
     use super::*;
 
+    fn test_candidate(text: &str, composing_count: ComposingCount) -> Candidate {
+        Candidate::single(text.into(), 0.0, composing_count, 501, Vec::new())
+    }
+
     #[test]
     fn editing_invalidates_candidates_and_reset_clears_composition() {
         let tables = InputTableRegistry::new();
@@ -1214,5 +1234,41 @@ mod tests {
         assert_eq!(representations[0].0.text, "kana");
         assert_eq!(representations[1].0.text, "ｋａｎａ");
         assert_eq!(representations[4].0.text, "かな");
+    }
+
+    #[test]
+    fn uses_only_main_results_when_a_first_clause_candidate_consumes_all_input() {
+        let tables = InputTableRegistry::new();
+        let mut session = ConversionSession::new();
+        session.insert_str("かな", InputStyle::Direct, &tables);
+        let result = ConversionResult {
+            main_results: vec![test_candidate("仮名", ComposingCount::Surface(2))],
+            first_clause_results: vec![test_candidate("かな", ComposingCount::Surface(2))],
+            ..ConversionResult::default()
+        };
+
+        assert_eq!(
+            session.desktop_candidates(&result, &tables),
+            result.main_results
+        );
+    }
+
+    #[test]
+    fn prepends_partial_first_clause_results_to_main_results() {
+        let tables = InputTableRegistry::new();
+        let mut session = ConversionSession::new();
+        session.insert_str("かな", InputStyle::Direct, &tables);
+        let first_clause = test_candidate("蚊", ComposingCount::Surface(1));
+        let main = test_candidate("仮名", ComposingCount::Surface(2));
+        let result = ConversionResult {
+            main_results: vec![main.clone()],
+            first_clause_results: vec![first_clause.clone()],
+            ..ConversionResult::default()
+        };
+
+        assert_eq!(
+            session.desktop_candidates(&result, &tables),
+            vec![first_clause, main]
+        );
     }
 }
