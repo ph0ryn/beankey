@@ -5,10 +5,10 @@ use std::path::Path;
 use beankey_converter::{
     Candidate, CandidateEvaluation, ConversionSession, DictionaryError, DictionaryMetadata,
     EfficientNGram, InputTableRegistry, NGramError, NormalConverter, PrefixConstraint,
-    ZenzEvaluationRequest, ZenzInferenceError, ZenzLanguageModel, ZenzPersonalization,
-    ZenzVersionConfig, evaluate_candidate,
+    ZenzEvaluationRequest, ZenzEvaluator, ZenzInferenceError, ZenzInferenceSequence,
+    ZenzLanguageModel, ZenzPersonalization, ZenzVersionConfig,
 };
-use beankey_llama::{LlamaContext, LlamaError};
+use beankey_llama::{LlamaContext, LlamaError, LlamaSequence};
 
 pub const DEFAULT_INFERENCE_LIMIT: usize = 10;
 const PERSONALIZATION_N: usize = 5;
@@ -86,6 +86,21 @@ impl ZenzLanguageModel for LlamaModel {
     fn next_logits(&mut self, tokens: &[i32]) -> Result<Vec<f32>, ZenzInferenceError> {
         self.context.next_logits(tokens).map_err(inference_error)
     }
+
+    fn logits_for_suffix(
+        &mut self,
+        tokens: &[i32],
+        start_index: usize,
+        sequence: ZenzInferenceSequence,
+    ) -> Result<Vec<f32>, ZenzInferenceError> {
+        let sequence = match sequence {
+            ZenzInferenceSequence::Evaluation => LlamaSequence::Evaluation,
+            ZenzInferenceSequence::InputPrediction => LlamaSequence::InputPrediction,
+        };
+        self.context
+            .logits(tokens, start_index, sequence)
+            .map_err(inference_error)
+    }
 }
 
 fn inference_error(error: LlamaError) -> ZenzInferenceError {
@@ -133,6 +148,7 @@ pub fn convert(
     converter: &NormalConverter<'_>,
     tables: &InputTableRegistry,
     model: &mut dyn ZenzLanguageModel,
+    evaluator: &mut ZenzEvaluator,
     options: ZenzConversionOptions<'_>,
 ) -> Result<(), ZenzConversionError> {
     let input = to_katakana(&session.composing().surface());
@@ -163,7 +179,7 @@ pub fn convert(
             return Ok(());
         }
 
-        let evaluation = evaluate_candidate(
+        let evaluation = evaluator.evaluate(
             model,
             ZenzEvaluationRequest {
                 input: &input,
@@ -290,7 +306,7 @@ mod tests {
 
     use beankey_converter::{
         ConversionSession, DictionaryStore, InputStyle, InputTableRegistry, NormalConverter,
-        ZenzInferenceError, ZenzLanguageModel, ZenzV3Config, ZenzVersionConfig,
+        ZenzEvaluator, ZenzInferenceError, ZenzLanguageModel, ZenzV3Config, ZenzVersionConfig,
     };
 
     use super::{ZenzConversionOptions, convert};
@@ -360,12 +376,14 @@ mod tests {
             evaluations: 0,
             prompts: Vec::new(),
         };
+        let mut evaluator = ZenzEvaluator::default();
 
         convert(
             &mut session,
             &converter,
             &tables,
             &mut model,
+            &mut evaluator,
             ZenzConversionOptions {
                 version: &ZenzVersionConfig::default(),
                 request_rich_candidates: false,
@@ -387,12 +405,14 @@ mod tests {
             evaluations: 0,
             prompts: Vec::new(),
         };
+        let mut evaluator = ZenzEvaluator::default();
 
         convert(
             &mut session,
             &converter,
             &tables,
             &mut model,
+            &mut evaluator,
             ZenzConversionOptions {
                 version: &ZenzVersionConfig::default(),
                 request_rich_candidates: false,
@@ -415,12 +435,14 @@ mod tests {
             evaluations: 0,
             prompts: Vec::new(),
         };
+        let mut evaluator = ZenzEvaluator::default();
 
         convert(
             &mut session,
             &converter,
             &tables,
             &mut model,
+            &mut evaluator,
             ZenzConversionOptions {
                 version: &ZenzVersionConfig::V3(ZenzV3Config {
                     enable_alignment_separator: true,

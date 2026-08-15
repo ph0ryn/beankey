@@ -12,8 +12,8 @@ use beankey_converter::{
     InputModifier, InputStyle as ConverterInputStyle, InputTable, InputTableId, InputTableRegistry,
     KeyboardLanguage, LearningError, LearningMemory, LearningMode, LmTypoConfig, NGramError,
     NGramLanguageModel, NormalConverter, PredictionMode, RequestOptions, SelectionError,
-    TextReplacer, TextReplacerError, TypoCorrectionMode, ZenzLanguageModel, ZenzV3Config,
-    ZenzVersionConfig, experimental_typo_correction,
+    TextReplacer, TextReplacerError, TypoCorrectionMode, ZenzEvaluator, ZenzLanguageModel,
+    ZenzV3Config, ZenzVersionConfig, experimental_typo_correction,
 };
 use beankey_llama::LlamaError;
 use serde::Deserialize;
@@ -103,6 +103,7 @@ pub struct Engine {
     tables: InputTableRegistry,
     sessions: HashMap<String, SessionState>,
     zenz_model: Option<Box<dyn ZenzLanguageModel>>,
+    zenz_evaluator: ZenzEvaluator,
     zenz_version: ZenzVersionConfig,
     zenz_rich_candidates: bool,
     zenz_inference_limit: usize,
@@ -260,6 +261,7 @@ impl Engine {
             tables: InputTableRegistry::new(),
             sessions: HashMap::new(),
             zenz_model: None,
+            zenz_evaluator: ZenzEvaluator::default(),
             zenz_version: ZenzVersionConfig::default(),
             zenz_rich_candidates: false,
             zenz_inference_limit: zenz::DEFAULT_INFERENCE_LIMIT,
@@ -1411,6 +1413,7 @@ impl Engine {
                 &converter,
                 &self.tables,
                 model,
+                &mut self.zenz_evaluator,
                 zenz::ZenzConversionOptions {
                     version: &version,
                     request_rich_candidates: self.zenz_rich_candidates,

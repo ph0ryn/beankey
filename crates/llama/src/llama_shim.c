@@ -48,10 +48,12 @@ struct beankey_llama *beankey_llama_load(
     context_params.n_ctx = 512;
     context_params.n_batch = 512;
     context_params.n_ubatch = 64;
-    context_params.n_seq_max = 1;
+    context_params.n_seq_max = 2;
+    context_params.kv_unified = true;
     context_params.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
     context_params.n_threads = thread_count;
     context_params.n_threads_batch = thread_count;
+    context_params.no_perf = true;
     struct llama_context *context = llama_init_from_model(model, context_params);
     if (context == NULL) {
         llama_model_free(model);
@@ -119,34 +121,60 @@ int32_t beankey_llama_token_to_piece(
     return llama_token_to_piece(handle->vocab, token, buffer, buffer_capacity, 0, false);
 }
 
-int32_t beankey_llama_next_logits(
+int32_t beankey_llama_logits(
     struct beankey_llama *handle,
     const int32_t *tokens,
     int32_t token_count,
+    int32_t logits_start_index,
+    int32_t sequence_id,
+    int32_t source_sequence_id,
+    int32_t cached_prefix_count,
     float *logits,
     int32_t logits_capacity
 ) {
     const int32_t vocabulary_size = llama_vocab_n_tokens(handle->vocab);
-    if (token_count <= 0 || token_count > 512 || logits_capacity < vocabulary_size) {
+    const int32_t logits_count = token_count - logits_start_index;
+    if (
+        vocabulary_size <= 0 || token_count <= 0 || token_count > 512 ||
+        logits_start_index < 0 || logits_start_index >= token_count ||
+        sequence_id < 0 || sequence_id >= 2 ||
+        source_sequence_id < -1 || source_sequence_id >= 2 ||
+        source_sequence_id == sequence_id ||
+        cached_prefix_count < 0 || cached_prefix_count > logits_start_index ||
+        logits_count > INT32_MAX / vocabulary_size ||
+        logits_capacity < logits_count * vocabulary_size
+    ) {
         return -1;
     }
-    llama_memory_clear(llama_get_memory(handle->context), true);
-    handle->batch.n_tokens = token_count;
-    for (int32_t index = 0; index < token_count; ++index) {
-        handle->batch.token[index] = tokens[index];
-        handle->batch.pos[index] = index;
-        handle->batch.n_seq_id[index] = 1;
-        handle->batch.seq_id[index][0] = 0;
-        handle->batch.logits[index] = index == token_count - 1 ? 1 : 0;
+    llama_memory_t memory = llama_get_memory(handle->context);
+    if (source_sequence_id >= 0) {
+        llama_memory_seq_rm(memory, sequence_id, 0, -1);
+        llama_memory_seq_cp(memory, source_sequence_id, sequence_id, 0, cached_prefix_count);
+    }
+    llama_memory_seq_rm(memory, sequence_id, cached_prefix_count, -1);
+    handle->batch.n_tokens = 0;
+    for (int32_t index = cached_prefix_count; index < token_count; ++index) {
+        const int32_t batch_index = handle->batch.n_tokens++;
+        handle->batch.token[batch_index] = tokens[index];
+        handle->batch.pos[batch_index] = index;
+        handle->batch.n_seq_id[batch_index] = 1;
+        handle->batch.seq_id[batch_index][0] = sequence_id;
+        handle->batch.logits[batch_index] = index >= logits_start_index ? 1 : 0;
     }
     const int32_t decode_result = llama_decode(handle->context, handle->batch);
     if (decode_result != 0) {
+        llama_memory_seq_rm(memory, sequence_id, 0, -1);
         return decode_result;
     }
-    const float *model_logits = llama_get_logits_ith(handle->context, -1);
+    const float *model_logits = llama_get_logits(handle->context);
     if (model_logits == NULL) {
+        llama_memory_seq_rm(memory, sequence_id, 0, -1);
         return -2;
     }
-    memcpy(logits, model_logits, (size_t)vocabulary_size * sizeof(*logits));
+    memcpy(
+        logits,
+        model_logits,
+        (size_t)logits_count * (size_t)vocabulary_size * sizeof(*logits)
+    );
     return 0;
 }

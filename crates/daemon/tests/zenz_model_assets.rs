@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use beankey_daemon::protocol::envelope::Payload;
 use beankey_daemon::{Engine, PROTOCOL_VERSION, protocol, read_envelope, write_envelope};
+use beankey_llama::{LlamaContext, LlamaSequence};
 use tempfile::TempDir;
 
 fn dictionary_root() -> PathBuf {
@@ -45,12 +46,28 @@ fn converts_with_the_fixed_zenz_model_and_llama_backend() {
         }),
     ));
 
-    let converted = engine.handle(envelope(
+    let first = engine.handle(envelope(
         2,
         Payload::KeyEvent(protocol::KeyEvent {
             action: protocol::UserAction::Input as i32,
             shift: false,
-            text: "はし".into(),
+            text: "は".into(),
+            surrounding_text: None,
+            input: String::new(),
+            intention: String::new(),
+        }),
+    ));
+    let Some(Payload::StateResponse(first)) = first.payload else {
+        panic!("fixed-model conversion returned a protocol error");
+    };
+    assert_eq!(first.preedit, "は");
+
+    let converted = engine.handle(envelope(
+        3,
+        Payload::KeyEvent(protocol::KeyEvent {
+            action: protocol::UserAction::Input as i32,
+            shift: false,
+            text: "し".into(),
             surrounding_text: None,
             input: String::new(),
             intention: String::new(),
@@ -62,6 +79,37 @@ fn converts_with_the_fixed_zenz_model_and_llama_backend() {
     };
     assert_eq!(state.preedit, "はし");
     assert!(!state.candidates.is_empty());
+}
+
+#[test]
+fn cached_and_batched_logits_match_a_single_full_evaluation() {
+    let (Ok(model_path), Ok(backend_directory)) = (
+        std::env::var("BEANKEY_TEST_MODEL"),
+        std::env::var("BEANKEY_TEST_LLAMA_BACKEND"),
+    ) else {
+        return;
+    };
+    let mut context = LlamaContext::load(model_path, backend_directory).unwrap();
+    let tokens = context
+        .tokenize("\u{ee00}テスト\u{ee01}候補", true)
+        .unwrap();
+    assert!(tokens.len() >= 2);
+
+    let batched = context
+        .logits(&tokens, 0, LlamaSequence::Evaluation)
+        .unwrap();
+    let single = context.next_logits(&tokens).unwrap();
+    let final_row = &batched[batched.len() - single.len()..];
+    let maximum_difference = final_row
+        .iter()
+        .zip(&single)
+        .map(|(batched, single)| (batched - single).abs())
+        .fold(0.0_f32, f32::max);
+
+    assert!(
+        maximum_difference < 1e-5,
+        "cached logits differed by {maximum_difference}"
+    );
 }
 
 #[test]
