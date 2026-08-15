@@ -758,6 +758,45 @@ fn exposes_manual_prediction_separately_and_accepts_it_with_tab() {
 }
 
 #[test]
+fn exposes_manual_prediction_from_a_katakana_prefix() {
+    let mut engine = Engine::open_with_conversion_resources(
+        dictionary_root(),
+        &ConversionConfig {
+            japanese_prediction: beankey_daemon::PredictionConfig::Manual,
+            live_conversion: false,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    response(engine.handle(envelope(
+        1,
+        Payload::StartSession(protocol::StartSession {
+            input_style: protocol::InputStyle::Direct as i32,
+            surrounding_text: None,
+            keyboard_language: protocol::KeyboardLanguage::Japanese as i32,
+            custom_input_table: String::new(),
+        }),
+    )));
+
+    let composing = response(engine.handle(envelope(
+        2,
+        Payload::KeyEvent(protocol::KeyEvent {
+            action: protocol::UserAction::Input as i32,
+            text: "キョ".into(),
+            input: "キョ".into(),
+            intention: "キョ".into(),
+            ..Default::default()
+        }),
+    )));
+
+    let prediction = composing
+        .prediction
+        .expect("katakana prefix did not expose a prediction");
+    assert!(!prediction.append_text.is_empty());
+    assert!(prediction.append_text.starts_with('う'));
+}
+
+#[test]
 fn shift_navigation_edits_the_selected_segment_length() {
     let mut engine = Engine::open(dictionary_root()).unwrap();
     response(engine.handle(envelope(

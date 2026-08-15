@@ -1736,6 +1736,7 @@ fn input_prediction(session: &SessionState, result: &ConversionResult) -> Option
     if target.chars().count() < 2 {
         return None;
     }
+    let target = to_hiragana(target);
     result.prediction_results.iter().find_map(|candidate| {
         let reading = candidate
             .entries
@@ -1743,7 +1744,7 @@ fn input_prediction(session: &SessionState, result: &ConversionResult) -> Option
             .map(|entry| entry.ruby.as_str())
             .collect::<String>();
         let reading = to_hiragana(&reading);
-        let append_text = reading.strip_prefix(target)?;
+        let append_text = reading.strip_prefix(&target)?;
         (!append_text.is_empty()).then(|| InputPrediction {
             display_text: candidate.text.clone(),
             append_text: append_text.to_owned(),
