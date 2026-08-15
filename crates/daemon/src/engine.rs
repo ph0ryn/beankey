@@ -76,6 +76,7 @@ struct SessionState {
     lm_typo_available: bool,
     learning_available: bool,
     learning_writable: bool,
+    zenz_cache: zenz::ZenzConversionCache,
 }
 
 impl SessionState {
@@ -97,6 +98,7 @@ impl SessionState {
         self.last_was_backspace = false;
         self.clear_presentation();
         self.typo_corrections.clear();
+        self.zenz_cache = zenz::ZenzConversionCache::default();
     }
 }
 
@@ -706,6 +708,7 @@ impl Engine {
                         lm_typo_available: self.lm_typo_enabled,
                         learning_available: self.learning_available,
                         learning_writable: self.learning_writable,
+                        zenz_cache: zenz::ZenzConversionCache::default(),
                     },
                 );
                 state_envelope(
@@ -1520,6 +1523,7 @@ impl Engine {
                 &self.tables,
                 model,
                 &mut self.zenz_evaluator,
+                &mut session.zenz_cache,
                 zenz::ZenzConversionOptions {
                     version: &version,
                     request_rich_candidates: self.zenz_rich_candidates || request_rich_candidates,

@@ -27,6 +27,51 @@ pub(crate) struct ZenzConversionOptions<'a> {
     pub(crate) personalization: Option<&'a ZenzPersonalizationModels>,
 }
 
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ZenzConversionCache {
+    input: String,
+    constraint: PrefixConstraint,
+    satisfying_candidate: Option<Candidate>,
+}
+
+impl ZenzConversionCache {
+    fn constraint_for(&self, input: &str) -> PrefixConstraint {
+        if let Some(candidate) = &self.satisfying_candidate {
+            let mut remaining = input;
+            let mut bytes = Vec::new();
+            for entry in &candidate.entries {
+                let Some(next) = remaining.strip_prefix(&entry.ruby) else {
+                    break;
+                };
+                bytes.extend_from_slice(entry.word.as_bytes());
+                remaining = next;
+            }
+            return PrefixConstraint::new(bytes);
+        }
+        if input.starts_with(&self.input) {
+            return PrefixConstraint {
+                bytes: self.constraint.bytes.clone(),
+                has_eos: false,
+                ignore_memory_and_user_dictionary: self
+                    .constraint
+                    .ignore_memory_and_user_dictionary,
+            };
+        }
+        PrefixConstraint::default()
+    }
+
+    fn update(
+        &mut self,
+        input: String,
+        constraint: PrefixConstraint,
+        satisfying_candidate: Option<Candidate>,
+    ) {
+        self.input = input;
+        self.constraint = constraint;
+        self.satisfying_candidate = satisfying_candidate;
+    }
+}
+
 impl ZenzPersonalizationModels {
     pub(crate) fn load(
         base: impl AsRef<Path>,
@@ -149,11 +194,12 @@ pub fn convert(
     tables: &InputTableRegistry,
     model: &mut dyn ZenzLanguageModel,
     evaluator: &mut ZenzEvaluator,
+    cache: &mut ZenzConversionCache,
     options: ZenzConversionOptions<'_>,
 ) -> Result<(), ZenzConversionError> {
     let input = to_katakana(&session.composing().surface());
     let input_cursor_position = Some(session.composing().cursor());
-    let mut constraint = PrefixConstraint::default();
+    let mut constraint = cache.constraint_for(&input);
 
     for inference in 0..=options.inference_limit {
         let draft = session
@@ -172,9 +218,12 @@ pub fn convert(
             .to_vec();
         let Some(candidate) = draft.first() else {
             session.set_zenz_candidates(draft);
+            cache.update(input, PrefixConstraint::default(), None);
             return Ok(());
         };
+        let candidate = candidate.clone();
         if inference == options.inference_limit {
+            cache.update(input, constraint, Some(candidate));
             session.set_zenz_candidates(draft);
             return Ok(());
         }
@@ -184,7 +233,7 @@ pub fn convert(
             ZenzEvaluationRequest {
                 input: &input,
                 input_cursor_position,
-                candidate,
+                candidate: &candidate,
                 request_rich_candidates: options.request_rich_candidates,
                 prefix_constraint: &constraint,
                 personalization: options
@@ -228,6 +277,7 @@ pub fn convert(
                         resolved.insert(1.min(resolved.len()), alternative);
                     }
                 }
+                cache.update(input, constraint, Some(candidate));
                 session.set_zenz_candidates(resolved);
                 return Ok(());
             }
@@ -239,11 +289,12 @@ pub fn convert(
                 );
                 if next == constraint {
                     if !constraint.ignore_memory_and_user_dictionary
-                        && candidate_uses_personal_dictionary(candidate)
+                        && candidate_uses_personal_dictionary(&candidate)
                     {
                         constraint.ignore_memory_and_user_dictionary = true;
                         continue;
                     }
+                    cache.update(input, constraint, Some(candidate));
                     session.set_zenz_candidates(draft);
                     return Ok(());
                 }
@@ -257,11 +308,12 @@ pub fn convert(
                 );
                 if next == constraint {
                     if !constraint.ignore_memory_and_user_dictionary
-                        && candidate_uses_personal_dictionary(candidate)
+                        && candidate_uses_personal_dictionary(&candidate)
                     {
                         constraint.ignore_memory_and_user_dictionary = true;
                         continue;
                     }
+                    cache.update(input, constraint, Some(candidate));
                     session.set_zenz_candidates(draft);
                     return Ok(());
                 }
@@ -297,7 +349,7 @@ mod tests {
         ZenzEvaluator, ZenzInferenceError, ZenzLanguageModel, ZenzV3Config, ZenzVersionConfig,
     };
 
-    use super::{ZenzConversionOptions, convert};
+    use super::{ZenzConversionCache, ZenzConversionOptions, convert};
 
     struct PrefixModel {
         evaluations: usize,
@@ -365,6 +417,7 @@ mod tests {
             prompts: Vec::new(),
         };
         let mut evaluator = ZenzEvaluator::default();
+        let mut cache = ZenzConversionCache::default();
 
         convert(
             &mut session,
@@ -372,6 +425,7 @@ mod tests {
             &tables,
             &mut model,
             &mut evaluator,
+            &mut cache,
             ZenzConversionOptions {
                 version: &ZenzVersionConfig::default(),
                 request_rich_candidates: false,
@@ -383,6 +437,7 @@ mod tests {
 
         assert_eq!(session.candidates()[0].text, "箸");
         assert!(model.evaluations >= 2);
+        assert_eq!(cache.constraint_for("ハシデ").bytes, "箸".as_bytes());
     }
 
     #[test]
@@ -394,6 +449,7 @@ mod tests {
             prompts: Vec::new(),
         };
         let mut evaluator = ZenzEvaluator::default();
+        let mut cache = ZenzConversionCache::default();
 
         convert(
             &mut session,
@@ -401,6 +457,7 @@ mod tests {
             &tables,
             &mut model,
             &mut evaluator,
+            &mut cache,
             ZenzConversionOptions {
                 version: &ZenzVersionConfig::default(),
                 request_rich_candidates: false,
@@ -424,6 +481,7 @@ mod tests {
             prompts: Vec::new(),
         };
         let mut evaluator = ZenzEvaluator::default();
+        let mut cache = ZenzConversionCache::default();
 
         convert(
             &mut session,
@@ -431,6 +489,7 @@ mod tests {
             &tables,
             &mut model,
             &mut evaluator,
+            &mut cache,
             ZenzConversionOptions {
                 version: &ZenzVersionConfig::V3(ZenzV3Config {
                     enable_alignment_separator: true,
