@@ -1689,22 +1689,67 @@ fn normalize_input_event(event: &mut protocol::KeyEvent, behavior: InputBehavior
     if protocol::UserAction::try_from(event.action) != Ok(protocol::UserAction::Input) {
         return;
     }
-    let logical = if event.intention.is_empty() {
-        event.input.as_str()
+    let input = if event.input.is_empty() {
+        event.text.as_str()
     } else {
-        event.intention.as_str()
+        event.input.as_str()
     };
-    let normalized = match logical {
-        "¥" | "\\" if event.shift => Some("|"),
-        "¥" | "\\" if behavior.type_backslash != event.option => Some("\\"),
-        "¥" | "\\" => Some("¥"),
+    let normalized = match input {
+        "¥" | "\\" if event.shift => Some("｜"),
+        "¥" | "\\" if behavior.type_backslash != event.option => Some("＼"),
+        "¥" | "\\" => Some("￥"),
         "," if !event.shift => Some(behavior.punctuation_style.comma(event.option)),
         "." if !event.shift => Some(behavior.punctuation_style.period(event.option)),
-        _ => None,
+        "/" | "?" if event.option && event.shift => Some("…"),
+        "/" if event.option => Some("／"),
+        "[" | "{" if event.option && event.shift => Some("｛"),
+        "[" if event.option => Some("［"),
+        "]" | "}" if event.option && event.shift => Some("｝"),
+        "]" if event.option => Some("］"),
+        _ => japanese_symbol_intention(input),
     };
     if let Some(normalized) = normalized {
         event.text = normalized.to_owned();
         event.intention = normalized.to_owned();
+    }
+}
+
+fn japanese_symbol_intention(input: &str) -> Option<&'static str> {
+    match input {
+        "!" => Some("！"),
+        "\"" => Some("”"),
+        "#" => Some("＃"),
+        "$" => Some("＄"),
+        "%" => Some("％"),
+        "&" => Some("＆"),
+        "'" => Some("’"),
+        "(" => Some("（"),
+        ")" => Some("）"),
+        "=" => Some("＝"),
+        "~" => Some("〜"),
+        "|" => Some("｜"),
+        "`" => Some("｀"),
+        "{" => Some("『"),
+        "+" => Some("＋"),
+        "*" => Some("＊"),
+        "}" => Some("』"),
+        "<" => Some("＜"),
+        ">" => Some("＞"),
+        "?" => Some("？"),
+        "_" => Some("＿"),
+        "-" => Some("ー"),
+        "^" => Some("＾"),
+        "\\" => Some("＼"),
+        "¥" => Some("￥"),
+        "@" => Some("＠"),
+        "[" => Some("「"),
+        ";" => Some("；"),
+        ":" => Some("："),
+        "]" => Some("」"),
+        "," => Some("、"),
+        "." => Some("。"),
+        "/" => Some("・"),
+        _ => None,
     }
 }
 

@@ -112,11 +112,13 @@ fn configured_engine(config: ConversionConfig) -> Engine {
 
 #[test]
 fn applies_the_desktop_backslash_preference_and_option_inversion() {
-    for (type_backslash, option, expected) in [
-        (false, false, "¥"),
-        (true, false, "\\"),
-        (false, true, "\\"),
-        (true, true, "¥"),
+    for (type_backslash, option, shift, expected) in [
+        (false, false, false, "￥"),
+        (true, false, false, "＼"),
+        (false, true, false, "＼"),
+        (true, true, false, "￥"),
+        (false, false, true, "｜"),
+        (true, true, true, "｜"),
     ] {
         let mut engine = configured_engine(ConversionConfig {
             type_backslash,
@@ -127,8 +129,100 @@ fn applies_the_desktop_backslash_preference_and_option_inversion() {
         event.input = "\\".into();
         event.intention = "\\".into();
         event.option = option;
+        event.shift = shift;
         let state = response(engine.handle(envelope(2, Payload::KeyEvent(event))));
         assert_eq!(state.preedit, expected);
+    }
+}
+
+#[test]
+fn matches_desktop_japanese_symbol_intentions_in_roman_input() {
+    let mut engine = configured_engine(ConversionConfig {
+        live_conversion: false,
+        ..Default::default()
+    });
+    start_roman_session(&mut engine, 1);
+
+    for (index, (input, expected)) in [
+        ("!", "！"),
+        ("\"", "”"),
+        ("#", "＃"),
+        ("$", "＄"),
+        ("%", "％"),
+        ("&", "＆"),
+        ("'", "’"),
+        ("(", "（"),
+        (")", "）"),
+        ("=", "＝"),
+        ("~", "〜"),
+        ("|", "｜"),
+        ("`", "｀"),
+        ("{", "『"),
+        ("+", "＋"),
+        ("*", "＊"),
+        ("}", "』"),
+        ("<", "＜"),
+        (">", "＞"),
+        ("?", "？"),
+        ("_", "＿"),
+        ("-", "ー"),
+        ("^", "＾"),
+        ("\\", "￥"),
+        ("¥", "￥"),
+        ("@", "＠"),
+        ("[", "「"),
+        (";", "；"),
+        (":", "："),
+        ("]", "」"),
+        (",", "、"),
+        (".", "。"),
+        ("/", "・"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let request_id = 2 + index as u64 * 2;
+        let state =
+            response(engine.handle(envelope(request_id, Payload::KeyEvent(key_event(0, input)))));
+        assert_eq!(state.preedit, expected, "unexpected mapping for {input}");
+        response(engine.handle(envelope(
+            request_id + 1,
+            Payload::ResetSession(protocol::ResetSession {}),
+        )));
+    }
+}
+
+#[test]
+fn matches_desktop_option_symbol_intentions_while_composing() {
+    let mut engine = configured_engine(ConversionConfig {
+        live_conversion: false,
+        ..Default::default()
+    });
+    start_roman_session(&mut engine, 1);
+
+    for (index, (input, shift, expected)) in [
+        ("/", false, "／"),
+        ("?", true, "…"),
+        ("[", false, "［"),
+        ("{", true, "｛"),
+        ("]", false, "］"),
+        ("}", true, "｝"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let request_id = 2 + index as u64 * 2;
+        let mut event = key_event(0, "");
+        event.input = input.into();
+        event.intention = input.into();
+        event.option = true;
+        event.shift = shift;
+        let state = response(engine.handle(envelope(request_id, Payload::KeyEvent(event))));
+        assert_eq!(state.preedit, expected, "unexpected mapping for {input}");
+        response(engine.handle(envelope(
+            request_id + 1,
+            Payload::ResetSession(protocol::ResetSession {}),
+        )));
     }
 }
 
@@ -211,6 +305,17 @@ fn applies_all_desktop_punctuation_styles_and_option_inversion() {
         option_comma.option = true;
         let inverted = response(engine.handle(envelope(6, Payload::KeyEvent(option_comma))));
         assert_eq!(inverted.preedit, if comma == "、" { "，" } else { "、" });
+
+        response(engine.handle(envelope(
+            7,
+            Payload::ResetSession(protocol::ResetSession {}),
+        )));
+        let mut option_period = key_event(0, "");
+        option_period.input = ".".into();
+        option_period.intention = ".".into();
+        option_period.option = true;
+        let inverted = response(engine.handle(envelope(8, Payload::KeyEvent(option_period))));
+        assert_eq!(inverted.preedit, if period == "。" { "．" } else { "。" });
     }
 }
 
