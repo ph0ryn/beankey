@@ -5,8 +5,8 @@ use unicode_segmentation::UnicodeSegmentation;
 use crate::kana::to_katakana;
 use crate::zenz::tokenize_for_model;
 use crate::{
-    ComposingText, InputPiece, InputStyle, InputTable, InputTableRegistry, ZenzInferenceError,
-    ZenzLanguageModel, ZenzPromptBuilder,
+    ComposingText, InputPiece, InputStyle, InputTable, InputTableRegistry, KeyElement,
+    ValueElement, ZenzInferenceError, ZenzLanguageModel, ZenzPromptBuilder,
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -47,8 +47,12 @@ pub struct LmTypoCandidate {
 #[derive(Clone)]
 struct Hypothesis {
     corrected: Vec<String>,
+    emitted_text: String,
+    emitted_tokens: Vec<i32>,
     observed_position: usize,
     previous_input: Option<String>,
+    pending: String,
+    proxy_log_probability: f32,
     channel_cost: f32,
     lm_score: f32,
     score: f32,
@@ -68,6 +72,184 @@ struct GenerationMode<'a> {
     filter_with_lm: bool,
 }
 
+struct LmScorer<'a> {
+    model: &'a mut dyn ZenzLanguageModel,
+    prompt_tokens: Vec<i32>,
+    token_cache: HashMap<String, Vec<i32>>,
+    distribution_cache: HashMap<Vec<i32>, Vec<f32>>,
+    pending_token_cache: HashMap<String, Vec<i32>>,
+    pending_score_cache: HashMap<(Vec<i32>, String), f32>,
+}
+
+impl<'a> LmScorer<'a> {
+    fn new(model: &'a mut dyn ZenzLanguageModel, prompt: &str) -> Result<Self, ZenzInferenceError> {
+        let prompt_tokens = tokenize_for_model(model, prompt, false)?;
+        Ok(Self {
+            model,
+            prompt_tokens,
+            token_cache: HashMap::new(),
+            distribution_cache: HashMap::new(),
+            pending_token_cache: HashMap::new(),
+            pending_score_cache: HashMap::new(),
+        })
+    }
+
+    fn tokenize(&mut self, text: &str) -> Result<Vec<i32>, ZenzInferenceError> {
+        if let Some(tokens) = self.token_cache.get(text) {
+            return Ok(tokens.clone());
+        }
+        let tokens = tokenize_for_model(self.model, text, false)?;
+        self.token_cache.insert(text.to_owned(), tokens.clone());
+        Ok(tokens)
+    }
+
+    fn next_log_probabilities(
+        &mut self,
+        emitted_tokens: &[i32],
+    ) -> Result<Vec<f32>, ZenzInferenceError> {
+        if let Some(probabilities) = self.distribution_cache.get(emitted_tokens) {
+            return Ok(probabilities.clone());
+        }
+        let mut tokens = self.prompt_tokens.clone();
+        tokens.extend_from_slice(emitted_tokens);
+        let logits = self.model.next_logits(&tokens)?;
+        if logits.len() != self.model.vocabulary_size() || logits.is_empty() {
+            return Err(ZenzInferenceError(format!(
+                "model returned {} logits for a vocabulary of {}",
+                logits.len(),
+                self.model.vocabulary_size()
+            )));
+        }
+        let maximum = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        let sum = logits
+            .iter()
+            .map(|value| (*value - maximum).exp())
+            .sum::<f32>();
+        let normalization = maximum + sum.ln();
+        let probabilities: Vec<_> = logits
+            .into_iter()
+            .map(|value| value - normalization)
+            .collect();
+        self.distribution_cache
+            .insert(emitted_tokens.to_vec(), probabilities.clone());
+        Ok(probabilities)
+    }
+
+    fn append_and_score(
+        &mut self,
+        emitted_tokens: &[i32],
+        append_text: &str,
+    ) -> Result<Option<(Vec<i32>, f32)>, ZenzInferenceError> {
+        let append_tokens = self.tokenize(append_text)?;
+        let mut tokens = emitted_tokens.to_vec();
+        let mut score = 0.0;
+        for token in append_tokens {
+            let probabilities = self.next_log_probabilities(&tokens)?;
+            let Some(index) = usize::try_from(token)
+                .ok()
+                .filter(|index| *index < probabilities.len())
+            else {
+                return Ok(None);
+            };
+            score += probabilities[index];
+            tokens.push(token);
+        }
+        Ok(Some((tokens, score)))
+    }
+
+    fn top_characters(
+        &mut self,
+        emitted_tokens: &[i32],
+        count: usize,
+    ) -> Result<Vec<String>, ZenzInferenceError> {
+        if count == 0 {
+            return Ok(Vec::new());
+        }
+        let probabilities = self.next_log_probabilities(emitted_tokens)?;
+        let mut token_ids: Vec<_> = (0..probabilities.len()).collect();
+        token_ids.sort_by(|left, right| probabilities[*right].total_cmp(&probabilities[*left]));
+        let mut result = Vec::new();
+        for token_id in token_ids.into_iter().take(count.saturating_mul(4)) {
+            let Ok(token_id) = i32::try_from(token_id) else {
+                continue;
+            };
+            let Ok(piece) = self.model.token_to_piece(token_id) else {
+                continue;
+            };
+            let Ok(piece) = String::from_utf8(piece) else {
+                continue;
+            };
+            let graphemes: Vec<_> = piece.graphemes(true).collect();
+            if graphemes.len() == 1 && !result.iter().any(|value| value == graphemes[0]) {
+                result.push(graphemes[0].to_owned());
+                if result.len() == count {
+                    break;
+                }
+            }
+        }
+        Ok(result)
+    }
+
+    fn pending_proxy_log_probability(
+        &mut self,
+        pending: &str,
+        emitted_tokens: &[i32],
+        table: Option<&InputTable>,
+    ) -> Result<Option<f32>, ZenzInferenceError> {
+        if pending.is_empty() {
+            return Ok(Some(0.0));
+        }
+        let Some(table) = table else {
+            return Ok(None);
+        };
+        let cache_key = (emitted_tokens.to_vec(), pending.to_owned());
+        if let Some(score) = self.pending_score_cache.get(&cache_key) {
+            return Ok(Some(*score));
+        }
+        let first_tokens = if let Some(tokens) = self.pending_token_cache.get(pending) {
+            tokens.clone()
+        } else {
+            let mut tokens = Vec::new();
+            for display in possible_next_displays(pending, table) {
+                let Some(first) = display.graphemes(true).next() else {
+                    continue;
+                };
+                let encoded = self.tokenize(first)?;
+                if encoded.len() == 1 && !tokens.contains(&encoded[0]) {
+                    tokens.push(encoded[0]);
+                }
+            }
+            tokens.sort_unstable();
+            self.pending_token_cache
+                .insert(pending.to_owned(), tokens.clone());
+            tokens
+        };
+        if first_tokens.is_empty() {
+            return Ok(None);
+        }
+        let probabilities = self.next_log_probabilities(emitted_tokens)?;
+        let values: Vec<_> = first_tokens
+            .into_iter()
+            .filter_map(|token| usize::try_from(token).ok())
+            .filter_map(|index| probabilities.get(index).copied())
+            .collect();
+        let maximum = values.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        if !maximum.is_finite() {
+            return Ok(None);
+        }
+        let sum = values
+            .into_iter()
+            .map(|value| (value - maximum).exp())
+            .sum::<f32>();
+        if sum <= 0.0 {
+            return Ok(None);
+        }
+        let score = maximum + sum.ln();
+        self.pending_score_cache.insert(cache_key, score);
+        Ok(Some(score))
+    }
+}
+
 pub fn experimental_typo_correction(
     model: &mut dyn ZenzLanguageModel,
     left_context: &str,
@@ -76,9 +258,12 @@ pub fn experimental_typo_correction(
     tables: &InputTableRegistry,
     config: &LmTypoConfig,
 ) -> Result<Vec<LmTypoCandidate>, ZenzInferenceError> {
-    if config.n_best == 0 || config.beam_size == 0 {
-        return Ok(Vec::new());
-    }
+    let config = LmTypoConfig {
+        beam_size: config.beam_size.max(1),
+        top_k: config.top_k.max(1),
+        n_best: config.n_best.max(1),
+        ..config.clone()
+    };
     let mode = generation_mode(input_style, tables);
     let observed = observed_input(composing, mode.use_surface);
     if observed.is_empty() {
@@ -86,16 +271,20 @@ pub fn experimental_typo_correction(
     }
 
     let prompt = ZenzPromptBuilder::typo_correction_prefix(left_context);
-    let prompt_tokens = tokenize_for_model(model, &prompt, false)?;
-    let mut score_cache = HashMap::<String, f32>::new();
-    let mut beam = vec![Hypothesis {
+    let mut scorer = LmScorer::new(model, &prompt)?;
+    let initial = Hypothesis {
         corrected: Vec::new(),
+        emitted_text: String::new(),
+        emitted_tokens: Vec::new(),
         observed_position: 0,
         previous_input: None,
+        pending: String::new(),
+        proxy_log_probability: 0.0,
         channel_cost: 0.0,
         lm_score: 0.0,
         score: 0.0,
-    }];
+    };
+    let mut beam = vec![initial.clone()];
     let max_steps = config.max_steps.unwrap_or(observed.len() * 2 + 8);
 
     for _ in 0..max_steps {
@@ -112,15 +301,11 @@ pub fn experimental_typo_correction(
                 continue;
             }
             expand_hypothesis(
-                model,
-                &prompt_tokens,
+                &mut scorer,
                 &observed,
                 hypothesis,
                 &mode,
-                input_style,
-                tables,
-                config,
-                &mut score_cache,
+                &config,
                 &mut expanded,
             )?;
         }
@@ -132,48 +317,23 @@ pub fn experimental_typo_correction(
         beam = expanded;
     }
 
-    for hypothesis in &mut beam {
-        if hypothesis.observed_position < observed.len() {
-            hypothesis
-                .corrected
-                .extend_from_slice(&observed[hypothesis.observed_position..]);
-            hypothesis.previous_input = hypothesis.corrected.last().cloned();
-            hypothesis.observed_position = observed.len();
-            score_hypothesis(
-                model,
-                &prompt_tokens,
-                hypothesis,
-                input_style,
-                tables,
-                &mut score_cache,
-            )?;
+    let mut completed = Vec::new();
+    for hypothesis in beam {
+        if let Some(hypothesis) =
+            complete_hypothesis(&mut scorer, hypothesis, &observed, mode.table)?
+        {
+            completed.push(hypothesis);
         }
     }
-
-    let mut original = Hypothesis {
-        corrected: observed,
-        observed_position: 0,
-        previous_input: None,
-        channel_cost: 0.0,
-        lm_score: 0.0,
-        score: 0.0,
-    };
-    original.observed_position = original.corrected.len();
-    original.previous_input = original.corrected.last().cloned();
-    score_hypothesis(
-        model,
-        &prompt_tokens,
-        &mut original,
-        input_style,
-        tables,
-        &mut score_cache,
-    )?;
-    beam.push(original);
+    beam = completed;
+    if let Some(original) = complete_hypothesis(&mut scorer, initial, &observed, mode.table)? {
+        beam.push(original);
+    }
 
     let mut unique = HashMap::<String, LmTypoCandidate>::new();
     for hypothesis in beam {
         let corrected_input = hypothesis.corrected.concat();
-        let converted_text = converted_text(&corrected_input, input_style, tables);
+        let converted_text = format!("{}{}", hypothesis.emitted_text, hypothesis.pending);
         let candidate = LmTypoCandidate {
             corrected_input: corrected_input.clone(),
             converted_text,
@@ -207,15 +367,11 @@ pub fn experimental_typo_correction(
 
 #[allow(clippy::too_many_arguments)]
 fn expand_hypothesis(
-    model: &mut dyn ZenzLanguageModel,
-    prompt_tokens: &[i32],
+    scorer: &mut LmScorer<'_>,
     observed: &[String],
     hypothesis: &Hypothesis,
     mode: &GenerationMode<'_>,
-    input_style: &InputStyle,
-    tables: &InputTableRegistry,
     config: &LmTypoConfig,
-    score_cache: &mut HashMap<String, f32>,
     expanded: &mut Vec<Hypothesis>,
 ) -> Result<(), ZenzInferenceError> {
     let position = hypothesis.observed_position;
@@ -223,8 +379,7 @@ fn expand_hypothesis(
     let mut targets = vec![(current.clone(), 0.0)];
     let mut substitutions = neighbors(current, mode.topology);
     if mode.filter_with_lm {
-        let converted_prefix = converted_text(&hypothesis.corrected.concat(), input_style, tables);
-        let likely = top_characters(model, prompt_tokens, &converted_prefix, config.top_k)?;
+        let likely = scorer.top_characters(&hypothesis.emitted_tokens, config.top_k)?;
         substitutions.retain(|(candidate, _)| likely.contains(candidate));
     }
     targets.extend(
@@ -234,23 +389,16 @@ fn expand_hypothesis(
     );
 
     for (target, channel_addition) in targets {
-        let mut next = hypothesis.clone();
-        next.corrected.push(target.clone());
-        next.observed_position += 1;
-        next.previous_input = Some(target);
-        next.channel_cost += channel_addition;
-        if tail_pending_is_modified(&next, observed, mode, channel_addition) {
-            continue;
-        }
-        score_hypothesis(
-            model,
-            prompt_tokens,
-            &mut next,
-            input_style,
-            tables,
-            score_cache,
+        add_advance(
+            scorer,
+            hypothesis,
+            observed,
+            mode.table,
+            vec![target],
+            1,
+            channel_addition,
+            expanded,
         )?;
-        expanded.push(next);
     }
 
     if position + 1 < observed.len()
@@ -270,58 +418,72 @@ fn expand_hypothesis(
         let mut next = hypothesis.clone();
         next.observed_position += 1;
         next.channel_cost += config.deletion_cost * distance;
-        score_hypothesis(
-            model,
-            prompt_tokens,
-            &mut next,
-            input_style,
-            tables,
-            score_cache,
-        )?;
-        expanded.push(next);
+        next.lm_score = hypothesis.lm_score - hypothesis.proxy_log_probability;
+        if let Some(proxy) =
+            scorer.pending_proxy_log_probability(&next.pending, &next.emitted_tokens, mode.table)?
+        {
+            next.proxy_log_probability = proxy;
+            next.lm_score += proxy;
+            next.score = next.lm_score - next.channel_cost;
+            expanded.push(next);
+        }
     }
 
     if position + 1 < observed.len() && observed[position] != observed[position + 1] {
-        let mut next = hypothesis.clone();
-        next.corrected.push(observed[position + 1].clone());
-        next.corrected.push(observed[position].clone());
-        next.observed_position += 2;
-        next.previous_input = Some(observed[position].clone());
-        next.channel_cost += config.transposition_cost;
-        if tail_pending_is_modified(&next, observed, mode, config.transposition_cost) {
-            return Ok(());
-        }
-        score_hypothesis(
-            model,
-            prompt_tokens,
-            &mut next,
-            input_style,
-            tables,
-            score_cache,
+        add_advance(
+            scorer,
+            hypothesis,
+            observed,
+            mode.table,
+            vec![observed[position + 1].clone(), observed[position].clone()],
+            2,
+            config.transposition_cost,
+            expanded,
         )?;
-        expanded.push(next);
     }
     Ok(())
 }
 
-fn score_hypothesis(
-    model: &mut dyn ZenzLanguageModel,
-    prompt_tokens: &[i32],
-    hypothesis: &mut Hypothesis,
-    input_style: &InputStyle,
-    tables: &InputTableRegistry,
-    score_cache: &mut HashMap<String, f32>,
+#[allow(clippy::too_many_arguments)]
+fn add_advance(
+    scorer: &mut LmScorer<'_>,
+    parent: &Hypothesis,
+    observed: &[String],
+    table: Option<&InputTable>,
+    true_sequence: Vec<String>,
+    observed_count: usize,
+    channel_addition: f32,
+    expanded: &mut Vec<Hypothesis>,
 ) -> Result<(), ZenzInferenceError> {
-    let corrected_input = hypothesis.corrected.concat();
-    let converted = converted_text(&corrected_input, input_style, tables);
-    hypothesis.lm_score = if let Some(score) = score_cache.get(&converted) {
-        *score
-    } else {
-        let score = language_model_score(model, prompt_tokens, &converted)?;
-        score_cache.insert(converted, score);
-        score
+    let Some(last) = true_sequence.last() else {
+        return Ok(());
     };
-    hypothesis.score = hypothesis.lm_score - hypothesis.channel_cost;
+    let mut pending = parent.pending.clone();
+    let mut emitted = String::new();
+    for character in &true_sequence {
+        let consumed = consume_with_emission(&pending, character, table);
+        emitted.push_str(&consumed.0);
+        pending = consumed.1;
+    }
+    let final_observed_index = parent.observed_position + observed_count - 1;
+    if final_observed_index == observed.len() - 1
+        && !pending.is_empty()
+        && (last != &observed[final_observed_index] || channel_addition > 0.0)
+    {
+        return Ok(());
+    }
+    if let Some(next) = evaluate_advance(
+        scorer,
+        parent,
+        true_sequence,
+        observed_count,
+        channel_addition,
+        emitted,
+        pending,
+        table,
+    )? {
+        expanded.push(next);
+    }
     Ok(())
 }
 
@@ -332,84 +494,86 @@ fn compare_hypotheses(left: &Hypothesis, right: &Hypothesis) -> std::cmp::Orderi
         .then_with(|| left.corrected.cmp(&right.corrected))
 }
 
-fn language_model_score(
-    model: &mut dyn ZenzLanguageModel,
-    prompt_tokens: &[i32],
-    text: &str,
-) -> Result<f32, ZenzInferenceError> {
-    let tokens = tokenize_for_model(model, text, false)?;
-    let mut prefix = prompt_tokens.to_vec();
-    let mut score = 0.0;
-    for token in tokens {
-        let log_probabilities = next_log_probabilities(model, &prefix)?;
-        let index = usize::try_from(token)
-            .ok()
-            .filter(|index| *index < log_probabilities.len())
-            .ok_or_else(|| ZenzInferenceError(format!("invalid typo candidate token {token}")))?;
-        score += log_probabilities[index];
-        prefix.push(token);
+#[allow(clippy::too_many_arguments)]
+fn evaluate_advance(
+    scorer: &mut LmScorer<'_>,
+    parent: &Hypothesis,
+    corrected_append: Vec<String>,
+    observed_count: usize,
+    channel_addition: f32,
+    emitted: String,
+    pending: String,
+    table: Option<&InputTable>,
+) -> Result<Option<Hypothesis>, ZenzInferenceError> {
+    if !parent.proxy_log_probability.is_finite() {
+        return Ok(None);
     }
-    Ok(score)
-}
-
-fn next_log_probabilities(
-    model: &mut dyn ZenzLanguageModel,
-    tokens: &[i32],
-) -> Result<Vec<f32>, ZenzInferenceError> {
-    let logits = model.next_logits(tokens)?;
-    if logits.len() != model.vocabulary_size() || logits.is_empty() {
-        return Err(ZenzInferenceError(format!(
-            "model returned {} logits for a vocabulary of {}",
-            logits.len(),
-            model.vocabulary_size()
-        )));
-    }
-    let maximum = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-    let sum = logits
-        .iter()
-        .map(|value| (*value - maximum).exp())
-        .sum::<f32>();
-    let normalization = maximum + sum.ln();
-    Ok(logits
-        .into_iter()
-        .map(|value| value - normalization)
-        .collect())
-}
-
-fn top_characters(
-    model: &mut dyn ZenzLanguageModel,
-    prompt_tokens: &[i32],
-    converted_prefix: &str,
-    count: usize,
-) -> Result<Vec<String>, ZenzInferenceError> {
-    if count == 0 {
-        return Ok(Vec::new());
-    }
-    let mut tokens = prompt_tokens.to_vec();
-    tokens.extend(tokenize_for_model(model, converted_prefix, false)?);
-    let probabilities = next_log_probabilities(model, &tokens)?;
-    let mut token_ids: Vec<_> = (0..probabilities.len()).collect();
-    token_ids.sort_by(|left, right| probabilities[*right].total_cmp(&probabilities[*left]));
-    let mut result = Vec::new();
-    for token_id in token_ids.into_iter().take(count.saturating_mul(4)) {
-        let Ok(token_id) = i32::try_from(token_id) else {
-            continue;
-        };
-        let Ok(piece) = model.token_to_piece(token_id) else {
-            continue;
-        };
-        let Ok(piece) = String::from_utf8(piece) else {
-            continue;
-        };
-        let graphemes: Vec<_> = UnicodeSegmentation::graphemes(piece.as_str(), true).collect();
-        if graphemes.len() == 1 && !result.iter().any(|existing| existing == graphemes[0]) {
-            result.push(graphemes[0].to_owned());
-            if result.len() == count {
-                break;
-            }
+    let base_lm_score = parent.lm_score - parent.proxy_log_probability;
+    let Some((emitted_tokens, emitted_score)) =
+        scorer.append_and_score(&parent.emitted_tokens, &emitted)?
+    else {
+        return Ok(None);
+    };
+    let Some(proxy) = scorer.pending_proxy_log_probability(&pending, &emitted_tokens, table)?
+    else {
+        if pending.is_empty() {
+            unreachable!("empty pending input always has a zero proxy score");
         }
+        return Ok(None);
+    };
+    let mut next = parent.clone();
+    next.corrected.extend(corrected_append.iter().cloned());
+    next.emitted_text.push_str(&emitted);
+    next.emitted_tokens = emitted_tokens;
+    next.observed_position += observed_count;
+    next.previous_input = corrected_append.last().cloned();
+    next.pending = pending;
+    next.proxy_log_probability = proxy;
+    next.channel_cost += channel_addition;
+    next.lm_score = base_lm_score + emitted_score + proxy;
+    next.score = next.lm_score - next.channel_cost;
+    Ok(Some(next))
+}
+
+fn complete_hypothesis(
+    scorer: &mut LmScorer<'_>,
+    mut hypothesis: Hypothesis,
+    observed: &[String],
+    table: Option<&InputTable>,
+) -> Result<Option<Hypothesis>, ZenzInferenceError> {
+    if hypothesis.observed_position >= observed.len() {
+        return Ok(Some(hypothesis));
     }
-    Ok(result)
+    if !hypothesis.proxy_log_probability.is_finite() {
+        return Ok(None);
+    }
+    let base_lm_score = hypothesis.lm_score - hypothesis.proxy_log_probability;
+    let mut newly_emitted = String::new();
+    while hypothesis.observed_position < observed.len() {
+        let current = &observed[hypothesis.observed_position];
+        let consumed = consume_with_emission(&hypothesis.pending, current, table);
+        newly_emitted.push_str(&consumed.0);
+        hypothesis.pending = consumed.1;
+        hypothesis.corrected.push(current.clone());
+        hypothesis.previous_input = Some(current.clone());
+        hypothesis.observed_position += 1;
+    }
+    let Some((emitted_tokens, emitted_score)) =
+        scorer.append_and_score(&hypothesis.emitted_tokens, &newly_emitted)?
+    else {
+        return Ok(None);
+    };
+    let Some(proxy) =
+        scorer.pending_proxy_log_probability(&hypothesis.pending, &emitted_tokens, table)?
+    else {
+        return Ok(None);
+    };
+    hypothesis.emitted_text.push_str(&newly_emitted);
+    hypothesis.emitted_tokens = emitted_tokens;
+    hypothesis.proxy_log_probability = proxy;
+    hypothesis.lm_score = base_lm_score + emitted_score + proxy;
+    hypothesis.score = hypothesis.lm_score - hypothesis.channel_cost;
+    Ok(Some(hypothesis))
 }
 
 fn generation_mode<'a>(
@@ -472,51 +636,105 @@ fn observed_input(composing: &ComposingText, use_surface: bool) -> Vec<String> {
         .collect()
 }
 
-fn tail_pending_is_modified(
-    hypothesis: &Hypothesis,
-    observed: &[String],
-    mode: &GenerationMode<'_>,
-    channel_addition: f32,
-) -> bool {
-    if hypothesis.observed_position != observed.len() {
-        return false;
-    }
-    let Some(table) = mode.table else {
-        return false;
-    };
-    let corrected = hypothesis.corrected.concat();
-    let last_was_modified = hypothesis.corrected.last() != observed.last();
-    trailing_pending(&corrected, table).is_some() && (last_was_modified || channel_addition > 0.0)
+fn apply_input_table(input: &str, table: &InputTable) -> String {
+    to_katakana(
+        &input.graphemes(true).fold(String::new(), |current, piece| {
+            table.applied(&current, InputPiece::character(piece))
+        }),
+    )
 }
 
-fn trailing_pending<'a>(input: &'a str, table: &InputTable) -> Option<&'a str> {
-    let boundaries: Vec<_> = input.char_indices().map(|(index, _)| index).collect();
-    for start in boundaries {
-        let suffix = &input[start..];
-        if !table.possible_nexts(suffix).is_empty() && apply_input_table(suffix, table) == suffix {
-            return Some(suffix);
+fn consume_with_emission(
+    pending: &str,
+    new_character: &str,
+    table: Option<&InputTable>,
+) -> (String, String) {
+    let Some(table) = table else {
+        return (new_character.to_owned(), String::new());
+    };
+    let raw = format!("{pending}{new_character}");
+    let converted = apply_input_table(&raw, table);
+    let next_pending = pending_suffix(&raw, &converted, table);
+    if next_pending.is_empty() {
+        return (converted, String::new());
+    }
+    let pending_count = next_pending.graphemes(true).count();
+    let converted_count = converted.graphemes(true).count();
+    if converted_count < pending_count {
+        return (String::new(), next_pending);
+    }
+    let emitted = converted
+        .graphemes(true)
+        .take(converted_count - pending_count)
+        .collect();
+    (emitted, next_pending)
+}
+
+fn pending_suffix(raw: &str, converted: &str, table: &InputTable) -> String {
+    let graphemes: Vec<_> = raw.graphemes(true).collect();
+    for length in (1..=graphemes.len()).rev() {
+        let suffix = graphemes[graphemes.len() - length..].concat();
+        if !has_continuation(&suffix, table) {
+            continue;
+        }
+        let display = apply_input_table(&suffix, table);
+        if display == suffix && converted.ends_with(&display) {
+            return suffix;
         }
     }
-    None
+    String::new()
 }
 
-fn apply_input_table(input: &str, table: &InputTable) -> String {
-    input.graphemes(true).fold(String::new(), |current, piece| {
-        table.applied(&current, InputPiece::character(piece))
+fn has_continuation(pending: &str, table: &InputTable) -> bool {
+    if !table.possible_nexts(pending).is_empty() {
+        return true;
+    }
+    let pending: Vec<_> = pending.graphemes(true).collect();
+    table.entries().any(|(key, _)| {
+        key.len() > pending.len()
+            && key.iter().zip(&pending).all(|(element, character)| {
+                matches!(element, KeyElement::Piece(InputPiece::Character(value)) if value == character)
+            })
     })
 }
 
-fn converted_text(
-    corrected_input: &str,
-    input_style: &InputStyle,
-    tables: &InputTableRegistry,
-) -> String {
-    if matches!(input_style, InputStyle::Direct) {
-        return corrected_input.to_owned();
+fn possible_next_displays(pending: &str, table: &InputTable) -> Vec<String> {
+    let mut displays = table.possible_nexts(pending);
+    let pending: Vec<_> = pending.graphemes(true).collect();
+    for (key, value) in table.entries() {
+        let Some(any_index) = key
+            .iter()
+            .position(|element| matches!(element, KeyElement::Any))
+        else {
+            continue;
+        };
+        if any_index != key.len() - 1 || any_index != pending.len() {
+            continue;
+        }
+        let prefix_matches = key[..any_index]
+            .iter()
+            .zip(&pending)
+            .all(|(element, character)| {
+                matches!(element, KeyElement::Piece(InputPiece::Character(value)) if value == character)
+            });
+        if !prefix_matches {
+            continue;
+        }
+        let output: String = value
+            .iter()
+            .take_while(|element| !matches!(element, ValueElement::Any))
+            .filter_map(|element| match element {
+                ValueElement::Character(character) => Some(character.as_str()),
+                ValueElement::Any => None,
+            })
+            .collect();
+        if !output.is_empty() {
+            displays.push(to_katakana(&output));
+        }
     }
-    let mut composing = ComposingText::new();
-    composing.insert_str(corrected_input, input_style.clone(), tables);
-    to_katakana(&composing.surface())
+    displays.sort();
+    displays.dedup();
+    displays
 }
 
 fn neighbors(character: &str, topology: Topology) -> Vec<(String, f32)> {
@@ -820,5 +1038,28 @@ mod tests {
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].corrected_input, "kana");
         assert_eq!(candidates[0].channel_cost, 0.0);
+    }
+
+    #[test]
+    fn zero_sized_limits_are_clamped_like_the_upstream_configuration() {
+        let (composing, tables) = composing("か", InputStyle::Direct);
+        let mut model = TestModel::new(&["\u{ee00}", "カ", "キ", "ク", "ケ", "コ"], "カ");
+        let candidates = experimental_typo_correction(
+            &mut model,
+            "",
+            &composing,
+            &InputStyle::Direct,
+            &tables,
+            &LmTypoConfig {
+                beam_size: 0,
+                top_k: 0,
+                n_best: 0,
+                ..LmTypoConfig::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].corrected_input, "カ");
     }
 }

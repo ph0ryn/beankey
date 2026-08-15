@@ -5,8 +5,14 @@ use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use beankey_converter::{
+    ComposingText, InputStyle, InputTableRegistry, LmTypoConfig, ZenzTokenizer,
+    experimental_typo_correction,
+};
 use beankey_daemon::protocol::envelope::Payload;
-use beankey_daemon::{Engine, PROTOCOL_VERSION, protocol, read_envelope, write_envelope};
+use beankey_daemon::{
+    Engine, LlamaModel, PROTOCOL_VERSION, protocol, read_envelope, write_envelope,
+};
 use beankey_llama::{LlamaContext, LlamaSequence};
 use tempfile::TempDir;
 
@@ -129,6 +135,158 @@ fn cached_and_batched_logits_match_a_single_full_evaluation() {
     assert!(
         maximum_difference < 1e-5,
         "cached logits differed by {maximum_difference}"
+    );
+}
+
+#[test]
+fn fixed_llama_tokenizer_matches_the_upstream_tokenizer_asset() {
+    let model_path = required_environment("BEANKEY_TEST_MODEL");
+    let backend_directory = required_environment("BEANKEY_TEST_LLAMA_BACKEND");
+    let tokenizer_path = required_environment("BEANKEY_TEST_ZENZ_TOKENIZER");
+    let context = LlamaContext::load(model_path, backend_directory).unwrap();
+    let tokenizer = ZenzTokenizer::open(tokenizer_path).unwrap();
+
+    for input in [
+        "\u{ee00}ハシ\u{ee01}箸",
+        "\u{ee02}前文脈\u{ee00}カンジ\u{ee01}漢字",
+        "ASCII\u{3000}SPACE",
+        "御社を第一に志望しています",
+    ] {
+        assert_eq!(
+            context.tokenize(input, false).unwrap(),
+            tokenizer.encode(input).unwrap(),
+            "token IDs diverged for {input:?}"
+        );
+    }
+}
+
+fn fixed_model_engine() -> Engine {
+    Engine::open_with_llama(
+        dictionary_root(),
+        required_environment("BEANKEY_TEST_MODEL"),
+        required_environment("BEANKEY_TEST_LLAMA_BACKEND"),
+    )
+    .expect("the fixed model and pinned llama.cpp backend must load")
+}
+
+fn start_input_session(engine: &mut Engine, style: protocol::InputStyle) {
+    engine.handle(envelope(
+        1,
+        Payload::StartSession(protocol::StartSession {
+            input_style: style as i32,
+            surrounding_text: None,
+            keyboard_language: protocol::KeyboardLanguage::Japanese as i32,
+            custom_input_table: String::new(),
+        }),
+    ));
+}
+
+fn input_state(engine: &mut Engine, request_id: u64, text: &str) -> protocol::StateResponse {
+    let response = engine.handle(envelope(
+        request_id,
+        Payload::KeyEvent(protocol::KeyEvent {
+            action: protocol::UserAction::Input as i32,
+            text: text.into(),
+            ..Default::default()
+        }),
+    ));
+    let Some(Payload::StateResponse(state)) = response.payload else {
+        panic!("fixed-model conversion returned a protocol error");
+    };
+    state
+}
+
+#[test]
+fn matches_the_fixed_upstream_full_conversion_regressions() {
+    for (input, expected) in [
+        (
+            "はがいたいのでしかいにみてもらった",
+            "歯が痛いので歯科医に診てもらった",
+        ),
+        (
+            "おんしゃをだいいちにしぼうしています",
+            "御社を第一に志望しています",
+        ),
+        (
+            "ふくをきて、きをきって、うみにきた",
+            "服を着て、木を切って、海に来た",
+        ),
+        (
+            "このぶんしょうはかんじへんかんがせいかくということでわだいのにほんごにゅうりょくしすてむをつかってうちこんでいます",
+            "この文章は漢字変換が正確ということで話題の日本語入力システムを使って打ち込んでいます",
+        ),
+    ] {
+        let mut engine = fixed_model_engine();
+        start_input_session(&mut engine, protocol::InputStyle::Direct);
+        let state = input_state(&mut engine, 2, input);
+        assert_eq!(
+            state
+                .candidates
+                .first()
+                .map(|candidate| candidate.text.as_str()),
+            Some(expected),
+            "fixed upstream top candidate diverged for {input}"
+        );
+    }
+}
+
+#[test]
+fn matches_the_pending_roman_upstream_regression() {
+    let mut engine = fixed_model_engine();
+    start_input_session(&mut engine, protocol::InputStyle::RomanToKana);
+    let mut final_state = None;
+    for (index, character) in "mizuwonomunda".chars().enumerate() {
+        final_state = Some(input_state(
+            &mut engine,
+            u64::try_from(index).unwrap() + 2,
+            &character.to_string(),
+        ));
+    }
+    let state = final_state.unwrap();
+    assert_eq!(state.preedit, "みずをのむんだ");
+    assert_eq!(
+        state
+            .candidates
+            .first()
+            .map(|candidate| candidate.text.as_str()),
+        Some("水を飲むんだ")
+    );
+}
+
+#[test]
+fn recovers_the_fixed_upstream_roman_typo_regression() {
+    let tables = InputTableRegistry::new();
+    let mut composing = ComposingText::new();
+    composing.insert_str("ojsyougozainasu", InputStyle::RomanToKana, &tables);
+    let mut model = LlamaModel::load(
+        required_environment("BEANKEY_TEST_MODEL"),
+        required_environment("BEANKEY_TEST_LLAMA_BACKEND"),
+    )
+    .unwrap();
+    let candidates = experimental_typo_correction(
+        &mut model,
+        "やあ、",
+        &composing,
+        &InputStyle::RomanToKana,
+        &tables,
+        &LmTypoConfig {
+            beam_size: 10,
+            top_k: 100,
+            n_best: 20,
+            ..LmTypoConfig::default()
+        },
+    )
+    .unwrap();
+
+    assert!(
+        candidates
+            .iter()
+            .any(|candidate| candidate.corrected_input == "ohayougozaimasu"),
+        "expected upstream correction, got {:?}",
+        candidates
+            .iter()
+            .map(|candidate| &candidate.corrected_input)
+            .collect::<Vec<_>>()
     );
 }
 
