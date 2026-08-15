@@ -1803,6 +1803,7 @@ fn requests_rich_zenz_candidates_when_candidate_selection_starts() {
 
 #[test]
 fn appends_a_partial_commit_to_the_immediate_zenz_left_context() {
+    let input = "きょうはあめ";
     let prompts = Arc::new(Mutex::new(Vec::new()));
     let model = ContextRecordingModel {
         prompts: Arc::clone(&prompts),
@@ -1827,7 +1828,7 @@ fn appends_a_partial_commit_to_the_immediate_zenz_left_context() {
         Payload::KeyEvent(protocol::KeyEvent {
             action: protocol::UserAction::Input as i32,
             shift: false,
-            text: "きょうはあめ".into(),
+            text: input.into(),
             surrounding_text: None,
             input: String::new(),
             intention: String::new(),
@@ -1835,12 +1836,28 @@ fn appends_a_partial_commit_to_the_immediate_zenz_left_context() {
         }),
     )));
     let selecting = response(engine.handle(envelope(3, Payload::KeyEvent(key_event(0xff54, "")))));
-    assert!(selecting.highlighted_preedit_length < selecting.preedit.chars().count() as u32);
+    let input_surface_count = input.chars().count() as u32;
+    let partial_index = selecting
+        .candidates
+        .iter()
+        .filter_map(|candidate| {
+            let protocol::composing_count::Count::Surface(count) =
+                candidate.composing_count.as_ref()?.count.as_ref()?
+            else {
+                return None;
+            };
+            (*count < input_surface_count).then_some((candidate.index, *count))
+        })
+        .max_by_key(|(_, count)| *count)
+        .map(|(index, _)| index)
+        .expect("rich candidates must include a partial first-clause conversion");
     let prompt_count_before_commit = prompts.lock().unwrap().len();
 
     let committed = response(engine.handle(envelope(
         4,
-        Payload::SelectCandidate(protocol::SelectCandidate { index: 0 }),
+        Payload::SelectCandidate(protocol::SelectCandidate {
+            index: partial_index,
+        }),
     )));
 
     assert!(!committed.reset);
