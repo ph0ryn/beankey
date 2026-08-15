@@ -1017,6 +1017,7 @@ impl Engine {
                     return self.select_candidate(session, session.selected_candidate);
                 }
                 let commit = current_marked_text(session, &self.tables);
+                self.learn_current_marked_candidate(session, &commit)?;
                 session.reset();
                 return Ok(make_state(session, true, commit, true));
             }
@@ -1030,22 +1031,22 @@ impl Engine {
                     session
                         .conversion
                         .insert_composition_separator(session.input_style.clone(), &self.tables);
-                    session.selected_candidate = 0;
-                    session.input_mode = if self.live_conversion {
-                        InputMode::Selecting
-                    } else {
-                        InputMode::Previewing
-                    };
-                    if session.input_mode == InputMode::Selecting {
+                    if self.live_conversion {
+                        session.input_mode = InputMode::Selecting;
                         self.request_rich_candidates(session)?;
+                        session.selected_candidate = 0;
                     } else {
+                        session.input_mode = InputMode::Previewing;
                         self.request_candidates(session)?;
+                        session.selected_candidate =
+                            session.preview_candidate_index.unwrap_or_default();
                     }
                     return Ok(make_state(session, true, String::new(), false));
                 }
                 InputMode::Previewing => {
                     self.request_rich_candidates(session)?;
                     session.input_mode = InputMode::Selecting;
+                    session.selected_candidate = 0;
                     return Ok(make_state(session, true, String::new(), false));
                 }
                 InputMode::Selecting => {
@@ -1310,27 +1311,9 @@ impl Engine {
         selected: ConverterCandidate,
         remainder_mode: InputMode,
     ) -> SessionRequestResult<protocol::StateResponse> {
-        let commit = session
-            .conversion
-            .select_candidate_value(selected, &self.tables)
-            .map_err(|error| match error {
-                SelectionError::CandidateOutOfRange { .. } => (
-                    Code::InvalidPayload,
-                    format!("candidate selection failed: {error}"),
-                ),
-                SelectionError::Learning(_) => (
-                    Code::Internal,
-                    format!("candidate selection failed: {error}"),
-                ),
-            })?;
+        let commit = self.select_and_commit_learning(session, selected)?;
         let mut left_context = session.surrounding.left.clone().unwrap_or_default();
         left_context.push_str(&commit);
-        session.conversion.commit_learning().map_err(|error| {
-            (
-                Code::Internal,
-                format!("learning memory commit failed: {error}"),
-            )
-        })?;
         session.clear_presentation();
         session.last_was_backspace = false;
         if !session.conversion.composing().is_empty() {
@@ -1342,6 +1325,59 @@ impl Engine {
         }
         let reset = session.conversion.composing().is_empty();
         Ok(make_state(session, true, commit, reset))
+    }
+
+    fn select_and_commit_learning(
+        &mut self,
+        session: &mut SessionState,
+        candidate: ConverterCandidate,
+    ) -> SessionRequestResult<String> {
+        let commit = session
+            .conversion
+            .select_candidate_value(candidate, &self.tables)
+            .map_err(|error| match error {
+                SelectionError::CandidateOutOfRange { .. } => (
+                    Code::InvalidPayload,
+                    format!("candidate selection failed: {error}"),
+                ),
+                SelectionError::Learning(_) => (
+                    Code::Internal,
+                    format!("candidate selection failed: {error}"),
+                ),
+            })?;
+        session.conversion.commit_learning().map_err(|error| {
+            (
+                Code::Internal,
+                format!("learning memory commit failed: {error}"),
+            )
+        })?;
+        Ok(commit)
+    }
+
+    fn learn_current_marked_candidate(
+        &mut self,
+        session: &mut SessionState,
+        marked_text: &str,
+    ) -> SessionRequestResult<()> {
+        let candidate = session
+            .live_candidate
+            .as_ref()
+            .filter(|candidate| candidate.text == marked_text)
+            .or_else(|| {
+                session
+                    .display_candidates
+                    .iter()
+                    .zip(&session.candidate_remainders)
+                    .find_map(|(candidate, remaining)| {
+                        (remaining.is_empty() && candidate.text == marked_text).then_some(candidate)
+                    })
+            })
+            .cloned();
+        let Some(candidate) = candidate else {
+            return Ok(());
+        };
+        self.select_and_commit_learning(session, candidate)?;
+        Ok(())
     }
 
     fn select_typo_correction(
@@ -2351,6 +2387,58 @@ mod tests {
 
         assert_eq!(state.preedit, "箸");
         assert_eq!(state.highlighted_preedit_length, 0);
+    }
+
+    #[test]
+    fn learns_a_live_candidate_committed_with_enter() {
+        let dictionary = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("data/azooKey_dictionary_storage/Dictionary");
+        let learning_directory = tempfile::tempdir().unwrap();
+        let mut engine =
+            Engine::open_with_zenz_model(dictionary, Box::new(LivePrefixModel)).unwrap();
+        engine
+            .load_learning(learning_directory.path(), &LearningConfig::default())
+            .unwrap();
+        engine.live_conversion = true;
+        let envelope = |request_id, payload| protocol::Envelope {
+            protocol_version: PROTOCOL_VERSION,
+            request_id,
+            session_id: "live-enter-learning".into(),
+            payload: Some(payload),
+            trace: Vec::new(),
+        };
+        engine.handle(envelope(
+            1,
+            Payload::StartSession(protocol::StartSession {
+                input_style: protocol::InputStyle::Direct as i32,
+                surrounding_text: None,
+                keyboard_language: protocol::KeyboardLanguage::Japanese as i32,
+                custom_input_table: String::new(),
+            }),
+        ));
+        engine.handle(envelope(
+            2,
+            Payload::KeyEvent(protocol::KeyEvent {
+                action: protocol::UserAction::Input as i32,
+                text: "はし".into(),
+                ..Default::default()
+            }),
+        ));
+
+        let response = engine.handle(envelope(
+            3,
+            Payload::KeyEvent(protocol::KeyEvent {
+                action: protocol::UserAction::Enter as i32,
+                ..Default::default()
+            }),
+        ));
+        let Payload::StateResponse(state) = response.payload.unwrap() else {
+            panic!("conversion did not return state");
+        };
+
+        assert_eq!(state.commit, "箸");
+        assert!(learning_directory.path().join("memory.bin").exists());
     }
 
     #[test]

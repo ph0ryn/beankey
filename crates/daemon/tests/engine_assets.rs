@@ -817,6 +817,39 @@ fn returns_enter_after_committing_a_candidate() {
 }
 
 #[test]
+fn learns_a_previewed_candidate_committed_with_enter() {
+    let state = TempDir::new().unwrap();
+    let mut engine = Engine::open_with_learning(dictionary_root(), state.path()).unwrap();
+    start_roman_session(&mut engine, 1);
+    response(engine.handle(envelope(
+        2,
+        Payload::KeyEvent(protocol::KeyEvent {
+            action: protocol::UserAction::Input as i32,
+            text: "shikai".into(),
+            ..Default::default()
+        }),
+    )));
+    let previewing = response(engine.handle(envelope(3, Payload::KeyEvent(key_event(0x20, "")))));
+    assert_eq!(
+        previewing.input_state,
+        protocol::InputState::Previewing as i32
+    );
+    assert_ne!(previewing.preedit, "しかい");
+
+    let entered = response(engine.handle(envelope(
+        4,
+        Payload::KeyEvent(protocol::KeyEvent {
+            action: protocol::UserAction::Enter as i32,
+            ..Default::default()
+        }),
+    )));
+
+    assert_eq!(entered.commit, previewing.preedit);
+    assert!(entered.reset);
+    assert!(state.path().join("memory.bin").exists());
+}
+
+#[test]
 fn does_not_persist_control_key_text_in_learning_memory() {
     for (name, key_sym, text) in [
         ("BackSpace", 0xff08, "\u{8}"),
