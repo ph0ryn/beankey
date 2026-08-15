@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use beankey_converter::{ZenzInferenceError, ZenzLanguageModel};
 use beankey_daemon::protocol::envelope::Payload;
@@ -1294,6 +1294,35 @@ struct PrefixModel {
     token_piece_calls: Option<Arc<AtomicUsize>>,
 }
 
+struct ContextRecordingModel {
+    prompts: Arc<Mutex<Vec<String>>>,
+}
+
+impl ZenzLanguageModel for ContextRecordingModel {
+    fn vocabulary_size(&self) -> usize {
+        3
+    }
+
+    fn eos_token(&self) -> i32 {
+        2
+    }
+
+    fn tokenize(&mut self, text: &str, add_special: bool) -> Result<Vec<i32>, ZenzInferenceError> {
+        if add_special {
+            self.prompts.lock().unwrap().push(text.to_owned());
+        }
+        Ok(vec![1])
+    }
+
+    fn token_to_piece(&mut self, _token: i32) -> Result<Vec<u8>, ZenzInferenceError> {
+        Ok(b"x".to_vec())
+    }
+
+    fn next_logits(&mut self, _tokens: &[i32]) -> Result<Vec<f32>, ZenzInferenceError> {
+        Ok(vec![0.0, 10.0, 0.0])
+    }
+}
+
 impl ZenzLanguageModel for PrefixModel {
     fn vocabulary_size(&self) -> usize {
         5
@@ -1405,6 +1434,62 @@ fn requests_rich_zenz_candidates_when_candidate_selection_starts() {
     assert!(
         token_piece_calls.load(Ordering::Relaxed) >= calls_before_selection + 3,
         "candidate selection must request the candidate token and rich alternatives"
+    );
+}
+
+#[test]
+fn appends_a_partial_commit_to_the_immediate_zenz_left_context() {
+    let prompts = Arc::new(Mutex::new(Vec::new()));
+    let model = ContextRecordingModel {
+        prompts: Arc::clone(&prompts),
+    };
+    let mut engine = Engine::open_with_zenz_model(dictionary_root(), Box::new(model)).unwrap();
+    response(engine.handle(envelope(
+        1,
+        Payload::StartSession(protocol::StartSession {
+            input_style: protocol::InputStyle::Direct as i32,
+            surrounding_text: Some(protocol::SurroundingText {
+                available: true,
+                text: "前".into(),
+                cursor: 1,
+                anchor: 1,
+            }),
+            keyboard_language: protocol::KeyboardLanguage::Japanese as i32,
+            custom_input_table: String::new(),
+        }),
+    )));
+    response(engine.handle(envelope(
+        2,
+        Payload::KeyEvent(protocol::KeyEvent {
+            action: protocol::UserAction::Input as i32,
+            shift: false,
+            text: "きょうはあめ".into(),
+            surrounding_text: None,
+            input: String::new(),
+            intention: String::new(),
+            option: false,
+        }),
+    )));
+    let selecting = response(engine.handle(envelope(3, Payload::KeyEvent(key_event(0xff54, "")))));
+    assert!(selecting.highlighted_preedit_length < selecting.preedit.chars().count() as u32);
+    let prompt_count_before_commit = prompts.lock().unwrap().len();
+
+    let committed = response(engine.handle(envelope(
+        4,
+        Payload::SelectCandidate(protocol::SelectCandidate { index: 0 }),
+    )));
+
+    assert!(!committed.reset);
+    assert!(!committed.commit.is_empty());
+    let expected_left_context = format!("前{}", committed.commit);
+    assert!(
+        prompts
+            .lock()
+            .unwrap()
+            .iter()
+            .skip(prompt_count_before_commit)
+            .any(|prompt| prompt.contains(&expected_left_context)),
+        "the remainder request must observe the just-committed prefix"
     );
 }
 

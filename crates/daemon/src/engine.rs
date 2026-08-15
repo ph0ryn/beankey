@@ -1317,6 +1317,8 @@ impl Engine {
                     format!("candidate selection failed: {error}"),
                 ),
             })?;
+        let mut left_context = session.surrounding.left.clone().unwrap_or_default();
+        left_context.push_str(&commit);
         session.conversion.commit_learning().map_err(|error| {
             (
                 Code::Internal,
@@ -1328,7 +1330,7 @@ impl Engine {
         if !session.conversion.composing().is_empty() {
             session.segment_surface_count = None;
             session.input_mode = remainder_mode;
-            self.request_candidates(session)?;
+            self.request_candidates_with_context(session, true, Some(&left_context))?;
         } else {
             session.input_mode = InputMode::None;
         }
@@ -1416,23 +1418,28 @@ impl Engine {
     }
 
     fn request_candidates(&mut self, session: &mut SessionState) -> SessionRequestResult<()> {
-        self.request_candidates_with_richness(session, false)
+        self.request_candidates_with_context(session, false, None)
     }
 
     fn request_rich_candidates(&mut self, session: &mut SessionState) -> SessionRequestResult<()> {
-        self.request_candidates_with_richness(session, true)
+        self.request_candidates_with_context(session, true, None)
     }
 
-    fn request_candidates_with_richness(
+    fn request_candidates_with_context(
         &mut self,
         session: &mut SessionState,
         request_rich_candidates: bool,
+        left_context: Option<&str>,
     ) -> SessionRequestResult<()> {
         let segment_request = session.segment_surface_count.is_some();
         if segment_request {
             session.conversion.begin_segment_request(&self.tables);
         }
-        let result = self.request_candidates_for_active_target(session, request_rich_candidates);
+        let result = self.request_candidates_for_active_target(
+            session,
+            request_rich_candidates,
+            left_context,
+        );
         if segment_request {
             session.conversion.end_segment_request();
             if result.is_ok() {
@@ -1454,6 +1461,7 @@ impl Engine {
         &mut self,
         session: &mut SessionState,
         request_rich_candidates: bool,
+        left_context: Option<&str>,
     ) -> SessionRequestResult<()> {
         session.conversion.refresh_learning().map_err(|error| {
             (
@@ -1463,7 +1471,8 @@ impl Engine {
         })?;
         let converter = NormalConverter::new(&self.dictionary);
         let result = if let Some(model) = self.zenz_model.as_deref_mut() {
-            let version = version_with_context(&self.zenz_version, &session.surrounding);
+            let surrounding = surrounding_with_left_context(&session.surrounding, left_context);
+            let version = version_with_context(&self.zenz_version, &surrounding);
             zenz::convert(
                 &mut session.conversion,
                 &converter,
@@ -1494,7 +1503,7 @@ impl Engine {
                             &self.tables,
                             model,
                             &version,
-                            session.surrounding.left.as_deref().unwrap_or(""),
+                            surrounding.left.as_deref().unwrap_or(""),
                         )
                         .map_err(|error| {
                             (
@@ -1864,6 +1873,17 @@ fn version_with_context(
             ZenzVersionConfig::V3(config)
         }
     }
+}
+
+fn surrounding_with_left_context(
+    surrounding: &SurroundingContext,
+    left_context: Option<&str>,
+) -> SurroundingContext {
+    let mut surrounding = surrounding.clone();
+    if let Some(left_context) = left_context {
+        surrounding.left = Some(left_context.to_owned());
+    }
+    surrounding
 }
 
 fn input_style(
