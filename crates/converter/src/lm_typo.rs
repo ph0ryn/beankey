@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::kana::to_katakana;
+use crate::zenz::tokenize_for_model;
 use crate::{
     ComposingText, InputPiece, InputStyle, InputTable, InputTableRegistry, ZenzInferenceError,
     ZenzLanguageModel, ZenzPromptBuilder,
@@ -85,7 +86,7 @@ pub fn experimental_typo_correction(
     }
 
     let prompt = ZenzPromptBuilder::typo_correction_prefix(left_context);
-    let prompt_tokens = model.tokenize(&prompt, false)?;
+    let prompt_tokens = tokenize_for_model(model, &prompt, false)?;
     let mut score_cache = HashMap::<String, f32>::new();
     let mut beam = vec![Hypothesis {
         corrected: Vec::new(),
@@ -336,7 +337,7 @@ fn language_model_score(
     prompt_tokens: &[i32],
     text: &str,
 ) -> Result<f32, ZenzInferenceError> {
-    let tokens = model.tokenize(text, false)?;
+    let tokens = tokenize_for_model(model, text, false)?;
     let mut prefix = prompt_tokens.to_vec();
     let mut score = 0.0;
     for token in tokens {
@@ -385,7 +386,7 @@ fn top_characters(
         return Ok(Vec::new());
     }
     let mut tokens = prompt_tokens.to_vec();
-    tokens.extend(model.tokenize(converted_prefix, false)?);
+    tokens.extend(tokenize_for_model(model, converted_prefix, false)?);
     let probabilities = next_log_probabilities(model, &tokens)?;
     let mut token_ids: Vec<_> = (0..probabilities.len()).collect();
     token_ids.sort_by(|left, right| probabilities[*right].total_cmp(&probabilities[*left]));

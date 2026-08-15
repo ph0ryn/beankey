@@ -32,6 +32,7 @@ pub(crate) struct ZenzConversionCache {
     input: String,
     constraint: PrefixConstraint,
     satisfying_candidate: Option<Candidate>,
+    evaluated_satisfying_candidate: Option<Candidate>,
 }
 
 impl ZenzConversionCache {
@@ -65,10 +66,12 @@ impl ZenzConversionCache {
         input: String,
         constraint: PrefixConstraint,
         satisfying_candidate: Option<Candidate>,
+        evaluated_satisfying_candidate: Option<Candidate>,
     ) {
         self.input = input;
         self.constraint = constraint;
         self.satisfying_candidate = satisfying_candidate;
+        self.evaluated_satisfying_candidate = evaluated_satisfying_candidate;
     }
 }
 
@@ -199,9 +202,15 @@ pub fn convert(
 ) -> Result<(), ZenzConversionError> {
     let input = to_katakana(&session.composing().surface());
     let input_cursor_position = Some(session.composing().cursor());
+    let defers_evaluation_for_pending_input = !options.request_rich_candidates
+        && options.personalization.is_none()
+        && session.pending_zenz_suffix_count(tables) > 0;
     let mut constraint = cache.constraint_for(&input);
+    let mut constructed_candidates = Vec::<Candidate>::new();
+    let mut inserted_candidates = Vec::<Candidate>::new();
+    let mut remaining_inferences = options.inference_limit;
 
-    for inference in 0..=options.inference_limit {
+    loop {
         let draft = session
             .request_zenz_draft(
                 converter,
@@ -216,113 +225,208 @@ pub fn convert(
                 &constraint,
             )?
             .to_vec();
-        let Some(candidate) = draft.first() else {
-            session.set_zenz_candidates(draft);
-            cache.update(input, PrefixConstraint::default(), None);
+        constructed_candidates.extend(draft.iter().cloned());
+        let Some((mut candidate_index, mut candidate)) = best_candidate(&draft) else {
+            session.set_zenz_candidates(inserted_candidates);
+            cache.update(input, PrefixConstraint::default(), None, None);
             return Ok(());
         };
-        let candidate = candidate.clone();
-        if inference == options.inference_limit {
-            cache.update(input, constraint, Some(candidate));
-            session.set_zenz_candidates(draft);
-            return Ok(());
-        }
+        'review: loop {
+            inserted_candidates.insert(0, candidate.clone());
+            if remaining_inferences == 0 {
+                cache.update(input, constraint, Some(candidate), None);
+                session.set_zenz_candidates(inserted_candidates);
+                return Ok(());
+            }
+            if defers_evaluation_for_pending_input {
+                let evaluated = (!constraint.is_empty())
+                    .then(|| cache.evaluated_satisfying_candidate.clone())
+                    .flatten();
+                cache.update(input, constraint, evaluated.clone(), evaluated);
+                session.set_zenz_candidates(inserted_candidates);
+                return Ok(());
+            }
 
-        let evaluation = evaluator.evaluate(
-            model,
-            ZenzEvaluationRequest {
-                input: &input,
-                input_cursor_position,
-                candidate: &candidate,
-                request_rich_candidates: options.request_rich_candidates,
-                prefix_constraint: &constraint,
-                personalization: options
-                    .personalization
-                    .map(ZenzPersonalizationModels::request),
-                version: options.version,
-            },
-        )?;
-        match evaluation {
-            CandidateEvaluation::Pass { alternatives, .. } => {
-                let mut resolved = draft;
-                for alternative in alternatives
-                    .into_iter()
-                    .rev()
-                    .filter(|alternative| alternative.probability_ratio > 0.25)
-                {
-                    let alternative_constraint = PrefixConstraint::normalized(
-                        alternative.bytes,
+            let evaluation = evaluator.evaluate(
+                model,
+                ZenzEvaluationRequest {
+                    input: &input,
+                    input_cursor_position,
+                    candidate: &candidate,
+                    request_rich_candidates: options.request_rich_candidates,
+                    prefix_constraint: &constraint,
+                    personalization: options
+                        .personalization
+                        .map(ZenzPersonalizationModels::request),
+                    version: options.version,
+                },
+            )?;
+            remaining_inferences -= 1;
+            match evaluation {
+                CandidateEvaluation::Pass { alternatives, .. } => {
+                    if options.request_rich_candidates {
+                        insert_rich_candidates(
+                            session,
+                            converter,
+                            tables,
+                            &mut inserted_candidates,
+                            &constructed_candidates,
+                            alternatives,
+                        )?;
+                    }
+                    cache.update(input, constraint, Some(candidate.clone()), Some(candidate));
+                    session.set_zenz_candidates(inserted_candidates);
+                    return Ok(());
+                }
+                CandidateEvaluation::FixRequired(bytes) => {
+                    let next = PrefixConstraint::normalized(
+                        bytes,
                         false,
                         constraint.ignore_memory_and_user_dictionary,
                     );
-                    let existing = resolved
-                        .iter()
-                        .filter(|candidate| candidate_satisfies(candidate, &alternative_constraint))
-                        .max_by(|left, right| left.value.total_cmp(&right.value))
-                        .cloned();
-                    let alternative = if existing.is_some() {
-                        existing
-                    } else if alternative.probability_ratio > 0.5 {
-                        session
-                            .request_zenz_draft(converter, tables, 3, &alternative_constraint)?
-                            .iter()
-                            .max_by(|left, right| left.value.total_cmp(&right.value))
-                            .cloned()
-                    } else {
-                        None
-                    };
-                    if let Some(alternative) = alternative
-                        && !resolved.iter().any(|item| item.text == alternative.text)
-                    {
-                        resolved.insert(1.min(resolved.len()), alternative);
+                    match review_rejection(
+                        &mut constraint,
+                        next,
+                        &draft,
+                        candidate_index,
+                        &candidate,
+                    ) {
+                        ReviewAction::Fail => {
+                            cache.update(input, PrefixConstraint::default(), None, None);
+                            session.set_zenz_candidates(inserted_candidates);
+                            return Ok(());
+                        }
+                        ReviewAction::Retry(index) => {
+                            candidate_index = index;
+                            candidate = draft[index].clone();
+                            continue 'review;
+                        }
+                        ReviewAction::Research => break 'review,
                     }
                 }
-                cache.update(input, constraint, Some(candidate));
-                session.set_zenz_candidates(resolved);
-                return Ok(());
-            }
-            CandidateEvaluation::FixRequired(bytes) => {
-                let next = PrefixConstraint::normalized(
-                    bytes,
-                    false,
-                    constraint.ignore_memory_and_user_dictionary,
-                );
-                if next == constraint {
-                    if !constraint.ignore_memory_and_user_dictionary
-                        && candidate_uses_personal_dictionary(&candidate)
-                    {
-                        constraint.ignore_memory_and_user_dictionary = true;
-                        continue;
+                CandidateEvaluation::WholeResult(result) => {
+                    let next = PrefixConstraint::normalized(
+                        result.into_bytes(),
+                        true,
+                        constraint.ignore_memory_and_user_dictionary,
+                    );
+                    match review_rejection(
+                        &mut constraint,
+                        next,
+                        &draft,
+                        candidate_index,
+                        &candidate,
+                    ) {
+                        ReviewAction::Fail => {
+                            cache.update(input, PrefixConstraint::default(), None, None);
+                            session.set_zenz_candidates(inserted_candidates);
+                            return Ok(());
+                        }
+                        ReviewAction::Retry(index) => {
+                            candidate_index = index;
+                            candidate = draft[index].clone();
+                            continue 'review;
+                        }
+                        ReviewAction::Research => break 'review,
                     }
-                    cache.update(input, constraint, Some(candidate));
-                    session.set_zenz_candidates(draft);
-                    return Ok(());
                 }
-                constraint = next;
-            }
-            CandidateEvaluation::WholeResult(result) => {
-                let next = PrefixConstraint::normalized(
-                    result.into_bytes(),
-                    true,
-                    constraint.ignore_memory_and_user_dictionary,
-                );
-                if next == constraint {
-                    if !constraint.ignore_memory_and_user_dictionary
-                        && candidate_uses_personal_dictionary(&candidate)
-                    {
-                        constraint.ignore_memory_and_user_dictionary = true;
-                        continue;
-                    }
-                    cache.update(input, constraint, Some(candidate));
-                    session.set_zenz_candidates(draft);
-                    return Ok(());
-                }
-                constraint = next;
             }
         }
     }
+}
 
-    unreachable!("the bounded inference loop always returns")
+fn best_candidate(candidates: &[Candidate]) -> Option<(usize, Candidate)> {
+    candidates
+        .iter()
+        .enumerate()
+        .max_by(|(_, left), (_, right)| left.value.total_cmp(&right.value))
+        .map(|(index, candidate)| (index, candidate.clone()))
+}
+
+enum ReviewAction {
+    Fail,
+    Retry(usize),
+    Research,
+}
+
+fn review_rejection(
+    constraint: &mut PrefixConstraint,
+    next: PrefixConstraint,
+    candidates: &[Candidate],
+    candidate_index: usize,
+    candidate: &Candidate,
+) -> ReviewAction {
+    if *constraint == next {
+        if !constraint.ignore_memory_and_user_dictionary
+            && candidate_uses_personal_dictionary(candidate)
+        {
+            constraint.ignore_memory_and_user_dictionary = true;
+            return retry_candidate(candidates, candidate_index, &next)
+                .map_or(ReviewAction::Research, ReviewAction::Retry);
+        }
+        return ReviewAction::Fail;
+    }
+
+    let incremental = next.bytes.starts_with(&constraint.bytes);
+    *constraint = next;
+    if incremental && let Some(index) = retry_candidate(candidates, candidate_index, constraint) {
+        return ReviewAction::Retry(index);
+    }
+    ReviewAction::Research
+}
+
+fn retry_candidate(
+    candidates: &[Candidate],
+    current_index: usize,
+    constraint: &PrefixConstraint,
+) -> Option<usize> {
+    candidates
+        .iter()
+        .enumerate()
+        .find_map(|(index, candidate)| {
+            (index != current_index
+                && candidate_satisfies(candidate, constraint)
+                && heuristic_retry_validation(candidate))
+            .then_some(index)
+        })
+}
+
+fn heuristic_retry_validation(candidate: &Candidate) -> bool {
+    !candidate.text.contains(['\u{3099}', '\u{309a}'])
+}
+
+fn insert_rich_candidates(
+    session: &mut ConversionSession,
+    converter: &NormalConverter<'_>,
+    tables: &InputTableRegistry,
+    inserted: &mut Vec<Candidate>,
+    constructed: &[Candidate],
+    alternatives: Vec<beankey_converter::AlternativeConstraint>,
+) -> Result<(), DictionaryError> {
+    for alternative in alternatives
+        .into_iter()
+        .rev()
+        .filter(|alternative| alternative.probability_ratio > 0.25)
+    {
+        let constraint = PrefixConstraint::normalized(alternative.bytes, false, false);
+        let existing = constructed
+            .iter()
+            .filter(|candidate| candidate_satisfies(candidate, &constraint))
+            .max_by(|left, right| left.value.total_cmp(&right.value))
+            .cloned();
+        let candidate = if existing.is_some() {
+            existing
+        } else if alternative.probability_ratio > 0.5 {
+            best_candidate(session.request_zenz_draft(converter, tables, 3, &constraint)?)
+                .map(|(_, candidate)| candidate)
+        } else {
+            None
+        };
+        if let Some(candidate) = candidate {
+            inserted.insert(1.min(inserted.len()), candidate);
+        }
+    }
+    Ok(())
 }
 
 fn candidate_satisfies(candidate: &Candidate, constraint: &PrefixConstraint) -> bool {
@@ -349,11 +453,44 @@ mod tests {
         ZenzEvaluator, ZenzInferenceError, ZenzLanguageModel, ZenzV3Config, ZenzVersionConfig,
     };
 
-    use super::{ZenzConversionCache, ZenzConversionOptions, convert};
+    use super::{
+        ReviewAction, ZenzConversionCache, ZenzConversionOptions, convert, review_rejection,
+    };
 
     struct PrefixModel {
         evaluations: usize,
         prompts: Vec<String>,
+    }
+
+    struct PassModel {
+        evaluations: usize,
+    }
+
+    impl ZenzLanguageModel for PassModel {
+        fn vocabulary_size(&self) -> usize {
+            4
+        }
+
+        fn eos_token(&self) -> i32 {
+            2
+        }
+
+        fn tokenize(
+            &mut self,
+            _text: &str,
+            add_special: bool,
+        ) -> Result<Vec<i32>, ZenzInferenceError> {
+            Ok(vec![if add_special { 1 } else { 3 }])
+        }
+
+        fn token_to_piece(&mut self, _token: i32) -> Result<Vec<u8>, ZenzInferenceError> {
+            Ok(b"x".to_vec())
+        }
+
+        fn next_logits(&mut self, _tokens: &[i32]) -> Result<Vec<f32>, ZenzInferenceError> {
+            self.evaluations += 1;
+            Ok(vec![0.0, 0.0, 0.0, 10.0])
+        }
     }
 
     impl ZenzLanguageModel for PrefixModel {
@@ -436,7 +573,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(session.candidates()[0].text, "箸");
-        assert!(model.evaluations >= 2);
+        assert_eq!(model.evaluations, 1);
         assert_eq!(cache.constraint_for("ハシデ").bytes, "箸".as_bytes());
     }
 
@@ -507,6 +644,84 @@ mod tests {
                 .prompts
                 .iter()
                 .any(|prompt| prompt.contains("\u{ee00}ハ\u{ee08}シ\u{ee01}"))
+        );
+    }
+
+    #[test]
+    fn repeated_model_constraint_is_not_cached_as_satisfied() {
+        let (dictionary, tables, mut session) = session();
+        let converter = NormalConverter::new(&dictionary);
+        let candidates = session
+            .request_zenz_draft(
+                &converter,
+                &tables,
+                2,
+                &beankey_converter::PrefixConstraint::default(),
+            )
+            .unwrap()
+            .to_vec();
+        let candidate = candidates[0].clone();
+        let mut constraint = beankey_converter::PrefixConstraint::new(b"x".to_vec());
+
+        let action = review_rejection(
+            &mut constraint,
+            beankey_converter::PrefixConstraint::new(b"x".to_vec()),
+            &candidates,
+            0,
+            &candidate,
+        );
+
+        assert!(matches!(action, ReviewAction::Fail));
+    }
+
+    #[test]
+    fn pending_roman_suffix_does_not_replace_the_last_evaluated_candidate() {
+        let (dictionary, tables, mut session) = session();
+        let converter = NormalConverter::new(&dictionary);
+        let mut model = PassModel { evaluations: 0 };
+        let mut evaluator = ZenzEvaluator::default();
+        let mut cache = ZenzConversionCache::default();
+        let version = ZenzVersionConfig::default();
+        let options = || ZenzConversionOptions {
+            version: &version,
+            request_rich_candidates: false,
+            inference_limit: 5,
+            personalization: None,
+        };
+
+        convert(
+            &mut session,
+            &converter,
+            &tables,
+            &mut model,
+            &mut evaluator,
+            &mut cache,
+            options(),
+        )
+        .unwrap();
+        let evaluated = cache.evaluated_satisfying_candidate.clone().unwrap();
+        let evaluations = model.evaluations;
+
+        session.insert_str("n", InputStyle::RomanToKana, &tables);
+        assert_eq!(session.pending_zenz_suffix_count(&tables), 1);
+        convert(
+            &mut session,
+            &converter,
+            &tables,
+            &mut model,
+            &mut evaluator,
+            &mut cache,
+            options(),
+        )
+        .unwrap();
+
+        assert_eq!(model.evaluations, evaluations);
+        assert_eq!(
+            cache
+                .evaluated_satisfying_candidate
+                .as_ref()
+                .map(|candidate| &candidate.text),
+            Some(&evaluated.text)
         );
     }
 }

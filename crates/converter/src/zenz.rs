@@ -334,6 +334,7 @@ struct EvaluationCacheKey {
     original_candidate_text: String,
     prefix_constraint: PrefixConstraint,
     request_rich_candidates: bool,
+    reuses_addressed_prefix: bool,
     candidate_segments: Vec<CandidateSegment>,
 }
 
@@ -392,6 +393,7 @@ impl<K: Clone + Eq + Hash, V: Clone> LruCache<K, V> {
 pub struct ZenzEvaluator {
     evaluations: LruCache<EvaluationCacheKey, CandidateEvaluation>,
     prompt_tokens: LruCache<String, Vec<i32>>,
+    previous_evaluation_prompt: String,
 }
 
 impl Default for ZenzEvaluator {
@@ -399,6 +401,7 @@ impl Default for ZenzEvaluator {
         Self {
             evaluations: LruCache::new(256),
             prompt_tokens: LruCache::new(128),
+            previous_evaluation_prompt: String::new(),
         }
     }
 }
@@ -416,18 +419,22 @@ impl ZenzEvaluator {
             .filter(|entry| entry.metadata.contains(DictionaryMetadata::USER_DICTIONARY))
             .map(|entry| format!("{}({})", entry.word, to_hiragana(&entry.ruby)))
             .collect::<String>();
-        let prompt = normalize_for_model(&ZenzPromptBuilder::candidate_evaluation(
+        let prompt = ZenzPromptBuilder::candidate_evaluation(
             request.input,
             request.input_cursor_position,
             &user_dictionary_prompt,
             request.version,
-        ));
+        );
+        let normalized_prompt = normalize_for_model(&prompt);
         let candidate_text = ZenzPromptBuilder::candidate_text_for_evaluation(
             &request.candidate.text,
             request.input,
             request.input_cursor_position,
             request.version,
         );
+        let reuses_addressed_prefix = self.previous_evaluation_prompt == normalized_prompt
+            && !request.request_rich_candidates;
+        self.previous_evaluation_prompt = normalized_prompt.clone();
         let cache_key = request
             .personalization
             .is_none()
@@ -437,6 +444,7 @@ impl ZenzEvaluator {
                 original_candidate_text: request.candidate.text.clone(),
                 prefix_constraint: request.prefix_constraint.clone(),
                 request_rich_candidates: request.request_rich_candidates,
+                reuses_addressed_prefix,
                 candidate_segments: request
                     .candidate
                     .entries
@@ -454,11 +462,35 @@ impl ZenzEvaluator {
         let prompt_tokens = if let Some(tokens) = self.prompt_tokens.get(&prompt) {
             tokens
         } else {
-            let tokens = model.tokenize(&prompt, true)?;
+            let tokens = tokenize_for_model(model, &prompt, true)?;
             self.prompt_tokens.insert(prompt.clone(), tokens.clone());
             tokens
         };
-        let result = evaluate_candidate_tokens(model, &request, prompt_tokens, &candidate_text)?;
+        let addressed_token_count = if reuses_addressed_prefix {
+            let mut prefix = String::new();
+            for character in UnicodeSegmentation::graphemes(request.candidate.text.as_str(), true) {
+                let next = format!("{prefix}{character}");
+                if request.prefix_constraint.bytes.starts_with(next.as_bytes()) {
+                    prefix = next;
+                } else {
+                    break;
+                }
+            }
+            if prefix.is_empty() {
+                0
+            } else {
+                tokenize_for_model(model, &prefix, false)?.len()
+            }
+        } else {
+            0
+        };
+        let result = evaluate_candidate_tokens(
+            model,
+            &request,
+            prompt_tokens,
+            &candidate_text,
+            addressed_token_count,
+        )?;
         if let Some(cache_key) = cache_key {
             self.evaluations.insert(cache_key, result.clone());
         }
@@ -478,11 +510,16 @@ fn evaluate_candidate_tokens(
     request: &ZenzEvaluationRequest<'_>,
     prompt_tokens: Vec<i32>,
     candidate_text: &str,
+    addressed_token_count: usize,
 ) -> Result<CandidateEvaluation, ZenzInferenceError> {
-    let candidate_tokens = model.tokenize(candidate_text, false)?;
+    let candidate_tokens = tokenize_for_model(model, candidate_text, false)?;
     let learned_priorities = learned_token_priorities(model, request.candidate, &candidate_tokens)?;
     let vocabulary_size = model.vocabulary_size();
+    let addressed_token_count = addressed_token_count.min(candidate_tokens.len());
     let mut candidate_prefix = Vec::new();
+    for &token in &candidate_tokens[..addressed_token_count] {
+        candidate_prefix.extend(model.token_to_piece(token)?);
+    }
     let mut score = 0.0;
     let mut alternatives = Vec::new();
 
@@ -497,16 +534,23 @@ fn evaluate_candidate_tokens(
             "candidate evaluation prompt produced no tokens".into(),
         ));
     }
+    if addressed_token_count == candidate_tokens.len() {
+        return Ok(CandidateEvaluation::Pass {
+            score,
+            alternatives,
+        });
+    }
     let prompt_token_count = prompt_tokens.len();
     let mut evaluation_tokens = prompt_tokens;
     evaluation_tokens.extend_from_slice(&candidate_tokens[..candidate_tokens.len() - 1]);
     let logits = model.logits_for_suffix(
         &evaluation_tokens,
-        prompt_token_count - 1,
+        prompt_token_count - 1 + addressed_token_count,
         ZenzInferenceSequence::Evaluation,
     )?;
     let expected_logits = candidate_tokens
         .len()
+        .saturating_sub(addressed_token_count)
         .checked_mul(vocabulary_size)
         .ok_or_else(|| ZenzInferenceError("candidate logits size overflow".into()))?;
     if logits.len() != expected_logits || vocabulary_size == 0 {
@@ -517,8 +561,12 @@ fn evaluate_candidate_tokens(
         )));
     }
 
-    for (candidate_index, &candidate_token) in candidate_tokens.iter().enumerate() {
-        let row_start = candidate_index * vocabulary_size;
+    for (candidate_index, &candidate_token) in candidate_tokens
+        .iter()
+        .enumerate()
+        .skip(addressed_token_count)
+    {
+        let row_start = (candidate_index - addressed_token_count) * vocabulary_size;
         let row = &logits[row_start..row_start + vocabulary_size];
         let personalized = personalized_logits(
             row,
@@ -535,7 +583,8 @@ fn evaluate_candidate_tokens(
                 ZenzInferenceError(format!("invalid candidate token {candidate_token}"))
             })?;
 
-        if maximum_token != candidate_token_index {
+        let candidate_was_maximum = maximum_token == candidate_token_index;
+        if !candidate_was_maximum {
             if i32::try_from(maximum_token).ok() == Some(model.eos_token()) {
                 return Ok(CandidateEvaluation::WholeResult(
                     String::from_utf8(candidate_prefix).unwrap_or_default(),
@@ -558,7 +607,7 @@ fn evaluate_candidate_tokens(
             }
         }
 
-        if request.request_rich_candidates {
+        if request.request_rich_candidates && candidate_was_maximum {
             let mut top_tokens: Vec<_> = evaluated.iter().copied().enumerate().collect();
             top_tokens.sort_by(|left, right| {
                 right
@@ -630,7 +679,7 @@ pub fn generate_next_input(
                 .iter()
                 .any(|prefix| prefix.starts_with(&to_katakana(candidate)))
     };
-    let mut prompt_tokens = model.tokenize(&prompt, true)?;
+    let mut prompt_tokens = tokenize_for_model(model, &prompt, true)?;
     let min_length = request.min_length.clamp(1, request.count);
     let vocabulary_size = model.vocabulary_size();
     let mut predicted = String::new();
@@ -699,7 +748,7 @@ pub fn generate_next_input(
         }
         predicted = best_next_text;
         predicted_count += 1;
-        let appended = model.tokenize(&character, false)?;
+        let appended = tokenize_for_model(model, &character, false)?;
         if appended.is_empty() {
             break;
         }
@@ -753,7 +802,7 @@ fn learned_token_priorities(
     }
     let mut priorities = Vec::new();
     for entry in &candidate.entries {
-        let token_count = model.tokenize(&entry.word, false)?.len();
+        let token_count = tokenize_for_model(model, &entry.word, false)?.len();
         let priority = if entry.metadata.contains(DictionaryMetadata::LEARNED) {
             learning_priority(&entry.ruby).ln()
         } else {
@@ -785,8 +834,16 @@ fn strict_argmax(logits: &[f32]) -> usize {
     maximum
 }
 
-fn normalize_for_model(value: &str) -> String {
-    value.replace(' ', "\u{3000}").replace(['\n', '\r'], "")
+pub(crate) fn normalize_for_model(value: &str) -> String {
+    value.replace(' ', "\u{3000}").replace('\n', "")
+}
+
+pub(crate) fn tokenize_for_model(
+    model: &mut dyn ZenzLanguageModel,
+    value: &str,
+    add_special: bool,
+) -> Result<Vec<i32>, ZenzInferenceError> {
+    model.tokenize(&normalize_for_model(value), add_special)
 }
 
 fn v3_conditions(config: &ZenzV3Config) -> Vec<String> {
@@ -856,6 +913,7 @@ mod tests {
     struct BatchedModel {
         suffix_evaluations: usize,
         prompt_tokenizations: usize,
+        start_indices: Vec<usize>,
     }
 
     impl ZenzLanguageModel for InputPredictionModel {
@@ -979,11 +1037,16 @@ mod tests {
         ) -> Result<Vec<f32>, ZenzInferenceError> {
             self.suffix_evaluations += 1;
             assert_eq!(tokens, [1, 3]);
-            assert_eq!(start_index, 0);
+            self.start_indices.push(start_index);
             assert_eq!(sequence, ZenzInferenceSequence::Evaluation);
-            Ok(vec![
+            let logits = vec![
                 -10.0, -10.0, -10.0, 2.0, -10.0, -10.0, -10.0, -10.0, -10.0, -10.0, 2.0, -10.0,
-            ])
+            ];
+            Ok(if start_index == 0 {
+                logits
+            } else {
+                logits[6..].to_vec()
+            })
         }
     }
 
@@ -1025,10 +1088,11 @@ mod tests {
     }
 
     #[test]
-    fn batches_candidate_logits_and_reuses_the_complete_evaluation() {
+    fn caches_incremental_evaluations_after_the_prompt_state_is_reused() {
         let mut model = BatchedModel {
             suffix_evaluations: 0,
             prompt_tokenizations: 0,
+            start_indices: Vec::new(),
         };
         let candidate = evaluation_candidate();
         let mut evaluator = ZenzEvaluator::default();
@@ -1051,11 +1115,54 @@ mod tests {
 
         let first = evaluate(&mut evaluator, &mut model);
         let second = evaluate(&mut evaluator, &mut model);
+        let third = evaluate(&mut evaluator, &mut model);
 
         assert_eq!(first, second);
+        assert_eq!(second, third);
         assert!(matches!(first, CandidateEvaluation::Pass { .. }));
-        assert_eq!(model.suffix_evaluations, 1);
+        assert_eq!(model.suffix_evaluations, 2);
         assert_eq!(model.prompt_tokenizations, 1);
+        assert_eq!(model.start_indices, [0, 0]);
+    }
+
+    #[test]
+    fn skips_the_model_prefix_already_addressed_by_the_constraint() {
+        let mut model = BatchedModel {
+            suffix_evaluations: 0,
+            prompt_tokenizations: 0,
+            start_indices: Vec::new(),
+        };
+        let candidate = evaluation_candidate();
+        let mut evaluator = ZenzEvaluator::default();
+        let version = ZenzVersionConfig::default();
+
+        for constraint in [
+            PrefixConstraint::default(),
+            PrefixConstraint::new(b"a".to_vec()),
+        ] {
+            let result = evaluator
+                .evaluate(
+                    &mut model,
+                    ZenzEvaluationRequest {
+                        input: "エービー",
+                        input_cursor_position: None,
+                        candidate: &candidate,
+                        request_rich_candidates: false,
+                        prefix_constraint: &constraint,
+                        personalization: None,
+                        version: &version,
+                    },
+                )
+                .unwrap();
+            assert!(matches!(result, CandidateEvaluation::Pass { .. }));
+        }
+
+        assert_eq!(model.start_indices, [0, 1]);
+    }
+
+    #[test]
+    fn normalizes_every_model_input_like_the_upstream_context() {
+        assert_eq!(normalize_for_model("a b\nc\r"), "a\u{3000}bc\r");
     }
 
     #[test]
