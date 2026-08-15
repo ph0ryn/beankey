@@ -56,6 +56,13 @@ int byteOffset(const std::string &text, std::size_t characterOffset) {
   return static_cast<int>(utf8::ncharByteLength(text.begin(), clamped));
 }
 
+std::unique_ptr<CommonCandidateList> makeCandidateList() {
+  auto candidates = std::make_unique<CommonCandidateList>();
+  candidates->setPageSize(kCandidatePageSize);
+  candidates->setLayoutHint(CandidateLayoutHint::Vertical);
+  return candidates;
+}
+
 class BeankeyCandidateWord final : public CandidateWord {
 public:
   BeankeyCandidateWord(std::uint32_t index, std::string text,
@@ -372,8 +379,7 @@ bool BeankeyState::apply(
   }
 
   candidateActions_.clear();
-  auto candidates = std::make_unique<CommonCandidateList>();
-  candidates->setPageSize(kCandidatePageSize);
+  auto candidates = makeCandidateList();
   const bool selecting =
       state.candidate_window() == beankey::v1::CANDIDATE_WINDOW_SELECTING;
   if (selecting) {
@@ -452,8 +458,7 @@ void BeankeyState::showTypoCorrections(
   }
   candidateActions_.clear();
   selectedCandidate_ = -1;
-  auto candidates = std::make_unique<CommonCandidateList>();
-  candidates->setPageSize(kCandidatePageSize);
+  auto candidates = makeCandidateList();
   candidates->setSelectionKey(Key::keyListFromString("1 2 3 4 5 6 7 8 9"));
   for (int index = 0; index < response.candidates_size(); ++index) {
     const auto &candidate = response.candidates(index);

@@ -318,6 +318,10 @@ int main() {
     valid = report(candidates && candidates->size() == 1,
                    "daemon candidates did not reach Fcitx") &&
             valid;
+    valid = report(candidates && candidates->layoutHint() ==
+                                     fcitx::CandidateLayoutHint::Vertical,
+                   "daemon candidates did not request a vertical layout") &&
+            valid;
     if (candidates && candidates->size() == 1) {
       valid = report(candidates->candidate(0).comment().toString() == "noun",
                      "candidate annotation did not reach Fcitx") &&
@@ -359,6 +363,10 @@ int main() {
         report(typoCandidates && typoCandidates->size() == 1,
                "LM typo corrections did not reach the Fcitx candidate UI") &&
         valid;
+    valid = report(typoCandidates && typoCandidates->layoutHint() ==
+                                         fcitx::CandidateLayoutHint::Vertical,
+                   "LM typo corrections did not request a vertical layout") &&
+            valid;
     if (typoCandidates && typoCandidates->size() == 1) {
       valid = report(typoCandidates->candidate(0).text().toString() == "仮名",
                      "LM typo correction displayed the wrong conversion") &&
