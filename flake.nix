@@ -36,6 +36,7 @@
           pkgs = pkgsFor system;
           development = import ./nix/dev-shell.nix {
             inherit pkgs;
+            model = self.packages.${system}.model;
             tokenizer = self.packages.${system}.tokenizer;
           };
         in
@@ -52,6 +53,7 @@
           pkgs = pkgsFor system;
           development = import ./nix/dev-shell.nix {
             inherit pkgs;
+            model = self.packages.${system}.model;
             tokenizer = self.packages.${system}.tokenizer;
           };
         in

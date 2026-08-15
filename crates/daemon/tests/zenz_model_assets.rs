@@ -26,14 +26,15 @@ fn envelope(request_id: u64, payload: Payload) -> protocol::Envelope {
     }
 }
 
+fn required_environment(name: &str) -> String {
+    std::env::var(name)
+        .unwrap_or_else(|_| panic!("{name} must be provided by the Nix test environment"))
+}
+
 #[test]
 fn converts_with_the_fixed_zenz_model_and_llama_backend() {
-    let (Ok(model_path), Ok(backend_directory)) = (
-        std::env::var("BEANKEY_TEST_MODEL"),
-        std::env::var("BEANKEY_TEST_LLAMA_BACKEND"),
-    ) else {
-        return;
-    };
+    let model_path = required_environment("BEANKEY_TEST_MODEL");
+    let backend_directory = required_environment("BEANKEY_TEST_LLAMA_BACKEND");
     let mut engine = Engine::open_with_llama(dictionary_root(), model_path, backend_directory)
         .expect("the fixed model and pinned llama.cpp backend must load");
     engine.handle(envelope(
@@ -80,17 +81,34 @@ fn converts_with_the_fixed_zenz_model_and_llama_backend() {
         panic!("fixed-model conversion returned a protocol error");
     };
     assert_eq!(state.preedit, "はし");
-    assert!(!state.candidates.is_empty());
+    assert_eq!(
+        state
+            .candidates
+            .first()
+            .map(|candidate| candidate.text.as_str()),
+        Some("はし")
+    );
+    assert!(
+        state
+            .candidates
+            .iter()
+            .any(|candidate| candidate.text == "箸")
+    );
+    assert!(state.candidates.iter().any(|candidate| {
+        matches!(
+            candidate
+                .composing_count
+                .as_ref()
+                .and_then(|count| count.count.as_ref()),
+            Some(protocol::composing_count::Count::Surface(1))
+        )
+    }));
 }
 
 #[test]
 fn cached_and_batched_logits_match_a_single_full_evaluation() {
-    let (Ok(model_path), Ok(backend_directory)) = (
-        std::env::var("BEANKEY_TEST_MODEL"),
-        std::env::var("BEANKEY_TEST_LLAMA_BACKEND"),
-    ) else {
-        return;
-    };
+    let model_path = required_environment("BEANKEY_TEST_MODEL");
+    let backend_directory = required_environment("BEANKEY_TEST_LLAMA_BACKEND");
     let mut context = LlamaContext::load(model_path, backend_directory).unwrap();
     let tokens = context
         .tokenize("\u{ee00}テスト\u{ee01}候補", true)
@@ -116,14 +134,10 @@ fn cached_and_batched_logits_match_a_single_full_evaluation() {
 
 #[test]
 fn runs_the_server_executable_with_the_fixed_nixos_assets() {
-    let (Ok(model), Ok(backend), Ok(english), Ok(greek)) = (
-        std::env::var("BEANKEY_TEST_MODEL"),
-        std::env::var("BEANKEY_TEST_LLAMA_BACKEND"),
-        std::env::var("BEANKEY_TEST_EN_US_DICTIONARY"),
-        std::env::var("BEANKEY_TEST_EL_GR_DICTIONARY"),
-    ) else {
-        return;
-    };
+    let model = required_environment("BEANKEY_TEST_MODEL");
+    let backend = required_environment("BEANKEY_TEST_LLAMA_BACKEND");
+    let english = required_environment("BEANKEY_TEST_EN_US_DICTIONARY");
+    let greek = required_environment("BEANKEY_TEST_EL_GR_DICTIONARY");
     let runtime = TempDir::new().unwrap();
     let config_path = runtime.path().join("config.toml");
     fs::write(
@@ -216,11 +230,14 @@ flash_attention = true
             panic!("server returned a protocol error");
         };
         if request.request_id == 2 {
-            assert!(
+            assert_eq!(
                 state
                     .candidates
                     .iter()
-                    .any(|candidate| candidate.text.len() > 3 && candidate.text.starts_with("hel"))
+                    .filter(|candidate| candidate.text.len() > 3)
+                    .map(|candidate| candidate.text.as_str())
+                    .collect::<Vec<_>>(),
+                ["hell", "held", "helm", "help"]
             );
         }
     }
