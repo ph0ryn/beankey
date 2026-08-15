@@ -296,9 +296,9 @@ in
 
     zenz = {
       inferenceLimit = mkOption {
-        type = types.ints.unsigned;
+        type = types.ints.between 1 50;
         default = 5;
-        description = "Maximum Zenz prefix correction attempts.";
+        description = "Maximum Zenz prefix correction attempts, between 1 and 50.";
       };
       richCandidates = mkOption {
         type = types.bool;
