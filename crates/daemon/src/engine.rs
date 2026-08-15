@@ -108,6 +108,9 @@ struct SurroundingContext {
 
 type SessionRequestResult<T> = Result<T, (Code, String)>;
 
+const DESKTOP_PROPER_NOUN_CID: u16 = 1288;
+const DESKTOP_GENERAL_MID: u16 = 501;
+
 pub struct Engine {
     dictionary: DictionaryStore,
     tables: InputTableRegistry,
@@ -436,9 +439,9 @@ impl Engine {
                 .map(|item| DictionaryEntry {
                     word: item.word,
                     ruby: to_katakana(&item.reading),
-                    left_id: 1288,
-                    right_id: 1288,
-                    meaning_id: 501,
+                    left_id: DESKTOP_PROPER_NOUN_CID,
+                    right_id: DESKTOP_PROPER_NOUN_CID,
+                    meaning_id: DESKTOP_GENERAL_MID,
                     base_value: -10.0,
                     adjustment: 0.0,
                     metadata: DictionaryMetadata::USER_DICTIONARY,
@@ -655,7 +658,10 @@ impl Engine {
                     );
                 };
                 let mut conversion = ConversionSession::new();
-                conversion.import_dynamic_user_dictionary(self.user_dictionary.clone(), Vec::new());
+                conversion.import_dynamic_user_dictionary(
+                    self.user_dictionary.clone(),
+                    desktop_dynamic_shortcuts(),
+                );
                 if let Some(path) = &self.user_dictionary_directory
                     && let Err(error) = conversion.update_user_dictionary_path(path.clone())
                 {
@@ -1932,6 +1938,63 @@ fn default_request_options() -> RequestOptions {
     }
 }
 
+fn desktop_dynamic_shortcuts() -> Vec<DictionaryEntry> {
+    const DATE_FORMATS: [(&str, f32, &str); 7] = [
+        ("M/d", -18.0, "western"),
+        ("yyyy/MM/dd", -18.1, "western"),
+        ("yyyy-MM-dd", -18.2, "western"),
+        ("M月d日（E）", -18.3, "western"),
+        ("yyyy年M月d日", -18.4, "western"),
+        ("Gyyyy年M月d日", -18.5, "japanese"),
+        ("E曜日", -18.6, "western"),
+    ];
+    const RELATIVE_DATES: [(&str, i64, i64); 5] = [
+        ("オトトイ", -2, 86_400),
+        ("キノウ", -1, 86_400),
+        ("キョウ", 0, 1),
+        ("アシタ", 1, 86_400),
+        ("アサッテ", 2, 86_400),
+    ];
+
+    let mut shortcuts = Vec::with_capacity(41);
+    for (format, value, calendar) in DATE_FORMATS {
+        shortcuts.extend(RELATIVE_DATES.map(|(ruby, delta, delta_unit)| {
+            date_shortcut(format, calendar, ruby, delta, delta_unit, value)
+        }));
+    }
+    shortcuts.extend([
+        date_shortcut("MM月", "western", "コンゲツ", 0, 1, -18.0),
+        date_shortcut("yyyy年", "western", "コトシ", 0, 1, -18.0),
+        date_shortcut("Gyyyy年", "japanese", "コトシ", 0, 1, -18.1),
+        date_shortcut("HH:mm", "western", "イマ", 0, 1, -18.0),
+        date_shortcut("HH時mm分", "western", "イマ", 0, 1, -18.1),
+        date_shortcut("aK時mm分", "western", "イマ", 0, 1, -18.2),
+    ]);
+    shortcuts
+}
+
+fn date_shortcut(
+    format: &str,
+    calendar: &str,
+    ruby: &str,
+    delta: i64,
+    delta_unit: i64,
+    value: f32,
+) -> DictionaryEntry {
+    DictionaryEntry {
+        word: format!(
+            r#"<date format="{format}" type="{calendar}" language="ja_JP" delta="{delta}" deltaunit="{delta_unit}">"#
+        ),
+        ruby: ruby.to_owned(),
+        left_id: DESKTOP_PROPER_NOUN_CID,
+        right_id: DESKTOP_PROPER_NOUN_CID,
+        meaning_id: DESKTOP_GENERAL_MID,
+        base_value: value,
+        adjustment: 0.0,
+        metadata: DictionaryMetadata::default(),
+    }
+}
+
 fn typo_correction_mode(value: TypoCorrectionConfig) -> TypoCorrectionMode {
     match value {
         TypoCorrectionConfig::Enabled => TypoCorrectionMode::Enabled,
@@ -2221,6 +2284,32 @@ mod tests {
                 Vec::new()
             }
         }
+    }
+
+    #[test]
+    fn mirrors_the_complete_desktop_dynamic_shortcut_set() {
+        let shortcuts = desktop_dynamic_shortcuts();
+
+        assert_eq!(shortcuts.len(), 41);
+        assert_eq!(
+            shortcuts
+                .iter()
+                .filter(|entry| entry.ruby == "キョウ")
+                .count(),
+            7
+        );
+        assert_eq!(
+            shortcuts
+                .iter()
+                .filter(|entry| entry.ruby == "イマ")
+                .count(),
+            3
+        );
+        assert!(shortcuts.iter().all(|entry| {
+            entry.left_id == DESKTOP_PROPER_NOUN_CID
+                && entry.right_id == DESKTOP_PROPER_NOUN_CID
+                && entry.meaning_id == DESKTOP_GENERAL_MID
+        }));
     }
 
     #[test]

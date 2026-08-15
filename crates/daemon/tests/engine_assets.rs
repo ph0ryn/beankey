@@ -585,6 +585,44 @@ fn keeps_a_single_character_raw_during_live_conversion() {
 }
 
 #[test]
+fn exposes_the_desktop_dynamic_date_and_time_shortcuts() {
+    let mut engine = Engine::open(dictionary_root()).unwrap();
+    response(engine.handle(envelope(
+        1,
+        Payload::StartSession(protocol::StartSession {
+            input_style: protocol::InputStyle::Direct as i32,
+            surrounding_text: None,
+            keyboard_language: protocol::KeyboardLanguage::Japanese as i32,
+            custom_input_table: String::new(),
+        }),
+    )));
+
+    let yesterday_before_last =
+        response(engine.handle(envelope(2, Payload::KeyEvent(key_event(0, "おととい")))));
+    assert!(
+        yesterday_before_last.candidates.iter().any(|candidate| {
+            candidate.text.matches('/').count() == 1
+                && candidate
+                    .text
+                    .chars()
+                    .all(|character| character.is_ascii_digit() || character == '/')
+        }),
+        "candidates: {:?}",
+        yesterday_before_last
+            .candidates
+            .iter()
+            .map(|candidate| &candidate.text)
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        yesterday_before_last
+            .candidates
+            .iter()
+            .all(|candidate| !candidate.text.contains("<date "))
+    );
+}
+
+#[test]
 fn zero_commits_selected_marked_text_and_starts_a_new_composition() {
     let mut engine = Engine::open(dictionary_root()).unwrap();
     start_roman_session(&mut engine, 1);
