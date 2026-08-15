@@ -229,6 +229,56 @@ fn matches_desktop_option_symbol_intentions_while_composing() {
 }
 
 #[test]
+fn inserts_printable_option_generated_characters() {
+    let mut engine = configured_engine(ConversionConfig {
+        live_conversion: false,
+        ..Default::default()
+    });
+    start_roman_session(&mut engine, 1);
+
+    for (index, (input, intention)) in [("¯", "<"), ("˘", ">")].into_iter().enumerate() {
+        let request_id = 2 + index as u64 * 2;
+        let mut event = key_event(0, "");
+        event.input = input.into();
+        event.intention = intention.into();
+        event.option = true;
+        event.shift = true;
+        let state = response(engine.handle(envelope(request_id, Payload::KeyEvent(event))));
+        assert_eq!(state.preedit, input);
+        response(engine.handle(envelope(
+            request_id + 1,
+            Payload::ResetSession(protocol::ResetSession {}),
+        )));
+    }
+}
+
+#[test]
+fn consumes_undefined_control_shortcuts_only_during_composition() {
+    let mut engine = Engine::open(dictionary_root()).unwrap();
+    start_roman_session(&mut engine, 1);
+
+    let idle = response(engine.handle(envelope(
+        2,
+        Payload::KeyEvent(protocol::KeyEvent {
+            action: protocol::UserAction::Consume as i32,
+            ..Default::default()
+        }),
+    )));
+    assert!(!idle.consumed);
+
+    response(engine.handle(envelope(3, Payload::KeyEvent(key_event(0, "kana")))));
+    let composing = response(engine.handle(envelope(
+        4,
+        Payload::KeyEvent(protocol::KeyEvent {
+            action: protocol::UserAction::Consume as i32,
+            ..Default::default()
+        }),
+    )));
+    assert!(composing.consumed);
+    assert_eq!(composing.preedit, "かな");
+}
+
+#[test]
 fn inverts_the_idle_space_width_when_half_space_is_enabled() {
     for (type_half_space, shift, expected) in [
         (false, false, "　"),

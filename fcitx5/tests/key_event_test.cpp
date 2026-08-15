@@ -85,6 +85,16 @@ int main() {
     valid = false;
   }
 
+  fcitx::KeyEvent controlQSource(nullptr,
+                                 fcitx::Key(FcitxKey_q, fcitx::KeyState::Ctrl));
+  beankey::v1::KeyEvent controlQTarget;
+  beankey::populateKeyEvent(controlQSource, &controlQTarget);
+  if (controlQTarget.action() != beankey::v1::USER_ACTION_CONSUME ||
+      !controlQTarget.text().empty()) {
+    std::cerr << "Undefined Control shortcut was not marked for consumption\n";
+    valid = false;
+  }
+
   fcitx::KeyEvent shiftedSpaceSource(
       nullptr, fcitx::Key(FcitxKey_space, fcitx::KeyState::Shift));
   beankey::v1::KeyEvent shiftedSpaceTarget;

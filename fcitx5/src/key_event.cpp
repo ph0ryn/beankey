@@ -65,7 +65,9 @@ v1::UserAction keyAction(const fcitx::KeyEvent &source) {
         logicalSymbol == FcitxKey_BackSpace) {
       return v1::USER_ACTION_FORGET;
     }
-    return shortcutAction(logicalSymbol);
+    const auto action = shortcutAction(logicalSymbol);
+    return action == v1::USER_ACTION_UNSPECIFIED ? v1::USER_ACTION_CONSUME
+                                                 : action;
   }
   switch (symbol) {
   case FcitxKey_BackSpace:

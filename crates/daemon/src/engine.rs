@@ -1217,6 +1217,10 @@ impl Engine {
             protocol::UserAction::Forget if session.input_mode == InputMode::Selecting => {
                 return self.forget_candidate(session, session.selected_candidate);
             }
+            protocol::UserAction::Consume => {
+                let consumed = session.input_mode != InputMode::None;
+                return Ok(make_state(session, consumed, String::new(), false));
+            }
             protocol::UserAction::Input if valid_event_text(&event) => {
                 let commit = matches!(
                     session.input_mode,
@@ -1805,6 +1809,14 @@ fn normalize_input_event(event: &mut protocol::KeyEvent, behavior: InputBehavior
     if let Some(normalized) = normalized {
         event.text = normalized.to_owned();
         event.intention = normalized.to_owned();
+    } else if event.option
+        && !input.is_empty()
+        && input.chars().all(|character| !character.is_control())
+        && input.chars().any(|character| !character.is_ascii())
+    {
+        let generated = input.to_owned();
+        event.text.clone_from(&generated);
+        event.intention = generated;
     }
 }
 
