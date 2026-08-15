@@ -409,6 +409,7 @@ impl Engine {
             learning_directory.as_ref().to_path_buf(),
             mode,
             config.max_count,
+            self.dictionary.character_ids().clone(),
         )?);
         self.learning_available = config.mode != LearningModeConfig::Nothing;
         self.learning_writable = config.mode == LearningModeConfig::InputAndOutput;
@@ -762,6 +763,14 @@ impl Engine {
         }
         session.last_request_id = request_id;
         if matches!(request, Payload::EndSession(_)) {
+            if let Err(error) = session.conversion.commit_learning() {
+                return error_envelope(
+                    request_id,
+                    session_id,
+                    Code::Internal,
+                    format!("learning memory commit failed: {error}"),
+                );
+            }
             return state_envelope(
                 request_id,
                 session_id,
@@ -1308,7 +1317,7 @@ impl Engine {
         selected: ConverterCandidate,
         remainder_mode: InputMode,
     ) -> SessionRequestResult<protocol::StateResponse> {
-        let commit = self.select_and_commit_learning(session, selected)?;
+        let commit = self.select_and_stage_learning(session, selected)?;
         let mut left_context = session.surrounding.left.clone().unwrap_or_default();
         left_context.push_str(&commit);
         session.clear_presentation();
@@ -1324,12 +1333,12 @@ impl Engine {
         Ok(make_state(session, true, commit, reset))
     }
 
-    fn select_and_commit_learning(
+    fn select_and_stage_learning(
         &mut self,
         session: &mut SessionState,
         candidate: ConverterCandidate,
     ) -> SessionRequestResult<String> {
-        let commit = session
+        session
             .conversion
             .select_candidate_value(candidate, &self.tables)
             .map_err(|error| match error {
@@ -1341,14 +1350,7 @@ impl Engine {
                     Code::Internal,
                     format!("candidate selection failed: {error}"),
                 ),
-            })?;
-        session.conversion.commit_learning().map_err(|error| {
-            (
-                Code::Internal,
-                format!("learning memory commit failed: {error}"),
-            )
-        })?;
-        Ok(commit)
+            })
     }
 
     fn learn_current_marked_candidate(
@@ -1373,7 +1375,7 @@ impl Engine {
         let Some(candidate) = candidate else {
             return Ok(());
         };
-        self.select_and_commit_learning(session, candidate)?;
+        self.select_and_stage_learning(session, candidate)?;
         Ok(())
     }
 
@@ -1806,7 +1808,7 @@ fn normalize_input_event(event: &mut protocol::KeyEvent, behavior: InputBehavior
     } else if event.option
         && !input.is_empty()
         && input.chars().all(|character| !character.is_control())
-        && input.chars().any(|character| !character.is_ascii())
+        && !input.is_ascii()
     {
         let generated = input.to_owned();
         event.text.clone_from(&generated);
@@ -2500,7 +2502,9 @@ mod tests {
         };
 
         assert_eq!(state.commit, "箸");
-        assert!(learning_directory.path().join("memory.bin").exists());
+        assert!(!learning_directory.path().join("memory.louds").exists());
+        engine.handle(envelope(4, Payload::EndSession(protocol::EndSession {})));
+        assert!(learning_directory.path().join("memory.louds").exists());
     }
 
     #[test]

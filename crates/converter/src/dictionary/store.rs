@@ -93,6 +93,10 @@ impl DictionaryStore {
         })
     }
 
+    pub fn character_ids(&self) -> &CharacterIdMap {
+        &self.character_ids
+    }
+
     pub fn exact_match(&self, ruby: &str) -> Result<Vec<DictionaryEntry>, DictionaryError> {
         let Some((identifier, ids)) = self.lookup_key(ruby) else {
             return Ok(Vec::new());

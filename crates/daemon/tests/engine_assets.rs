@@ -935,7 +935,16 @@ fn learns_a_previewed_candidate_committed_with_enter() {
 
     assert_eq!(entered.commit, previewing.preedit);
     assert!(entered.reset);
-    assert!(state.path().join("memory.bin").exists());
+    assert!(!state.path().join("memory.louds").exists());
+    response(engine.handle(envelope(5, Payload::EndSession(protocol::EndSession {}))));
+    for file in [
+        "memory.louds",
+        "memory.loudschars2",
+        "memory.memorymetadata",
+        "memory0.loudstxt3",
+    ] {
+        assert!(state.path().join(file).exists(), "missing {file}");
+    }
 }
 
 #[test]
@@ -954,9 +963,17 @@ fn does_not_persist_control_key_text_in_learning_memory() {
         start_roman_session(&mut engine, 1);
         response(engine.handle(envelope(2, Payload::KeyEvent(key_event(key_sym, text)))));
         response(engine.handle(envelope(3, Payload::KeyEvent(key_event(0xff0d, "")))));
+        response(engine.handle(envelope(4, Payload::EndSession(protocol::EndSession {}))));
 
         assert!(
-            !state.path().join("memory.bin").exists(),
+            state.path().join("memory.louds").exists(),
+            "{name} did not finish the upstream save transaction"
+        );
+        assert_eq!(
+            std::fs::metadata(state.path().join("memory.memorymetadata"))
+                .unwrap()
+                .len(),
+            6,
             "{name} control text reached persistent learning memory"
         );
     }
@@ -1169,7 +1186,9 @@ fn persists_forgets_and_resets_learning_through_session_requests() {
         3,
         Payload::SelectCandidate(protocol::SelectCandidate { index: selected }),
     )));
-    let memory_path = state.path().join("memory.bin");
+    let memory_path = state.path().join("memory.memorymetadata");
+    assert!(!memory_path.exists());
+    response(engine.handle(envelope(4, Payload::EndSession(protocol::EndSession {}))));
     let learned_size = std::fs::metadata(&memory_path).unwrap().len();
     drop(engine);
 

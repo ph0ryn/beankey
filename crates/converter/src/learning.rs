@@ -1,3 +1,4 @@
+use std::collections::{BTreeMap, HashSet};
 use std::error::Error;
 use std::fmt;
 use std::fs;
@@ -10,13 +11,16 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use crate::lattice::is_clause;
 use crate::{
-    Candidate, DictionaryEntry, DictionaryMetadata, PostCompositionPrediction, PostPredictionKind,
+    Candidate, CharacterIdMap, DictionaryEntry, DictionaryMetadata, Louds,
+    PostCompositionPrediction, PostPredictionKind, parse_entry_shard,
 };
 
-const MAGIC: &[u8] = b"BEANKEY_MEMORY_V1\0";
-const MEMORY_FILE: &str = "memory.bin";
-const TEMPORARY_FILE: &str = "memory.bin.2";
+const LOUDS_FILE: &str = "memory.louds";
+const LOUDS_CHARS_FILE: &str = "memory.loudschars2";
+const METADATA_FILE: &str = "memory.memorymetadata";
 const PAUSE_FILE: &str = ".pause";
+const SHARD_SIZE: usize = 2_048;
+const METADATA_ELEMENT_SIZE: usize = 6;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum LearningMode {
@@ -71,6 +75,7 @@ pub struct LearningMemory {
 
 struct LearningState {
     directory: PathBuf,
+    character_ids: CharacterIdMap,
     mode: LearningMode,
     max_count: usize,
     today: u16,
@@ -91,14 +96,22 @@ impl LearningMemory {
         directory: impl Into<PathBuf>,
         mode: LearningMode,
         max_count: usize,
+        character_ids: CharacterIdMap,
     ) -> Result<Self, LearningError> {
-        Self::open_on_day(directory.into(), mode, max_count, current_day())
+        Self::open_on_day(
+            directory.into(),
+            mode,
+            max_count,
+            character_ids,
+            current_day(),
+        )
     }
 
     fn open_on_day(
         directory: PathBuf,
         mode: LearningMode,
         max_count: usize,
+        character_ids: CharacterIdMap,
         today: u16,
     ) -> Result<Self, LearningError> {
         fs::create_dir_all(&directory).map_err(|source| LearningError::Io {
@@ -107,22 +120,18 @@ impl LearningMemory {
         })?;
         let mut persisted = if mode.uses_memory() {
             recover_if_paused(&directory)?;
-            let path = directory.join(MEMORY_FILE);
-            match fs::read(&path) {
-                Ok(bytes) => decode(&bytes)?,
-                Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
-                Err(source) => return Err(LearningError::Io { path, source }),
-            }
+            decode_directory(&directory)?
         } else {
             Vec::new()
         };
         if mode.uses_memory() {
-            persisted.retain(|record| valid_learning_entry(&record.entry));
+            persisted.retain(|record| valid_learning_entry(&record.entry, &character_ids));
             decay(&mut persisted, today);
         }
         Ok(Self {
             inner: Arc::new(Mutex::new(LearningState {
                 directory,
+                character_ids,
                 mode,
                 max_count,
                 today,
@@ -153,21 +162,23 @@ impl LearningMemory {
             return Ok(());
         }
         let today = state.today;
+        let character_ids = state.character_ids.clone();
         for entry in candidate
             .entries
             .iter()
             .filter(|entry| learns_individual_word(entry))
         {
-            memorize(&mut state.temporary, entry.clone(), today);
+            memorize(&mut state.temporary, entry.clone(), today, &character_ids);
         }
         for entry in learned_clause_entries(&candidate.entries) {
-            memorize(&mut state.temporary, entry, today);
+            memorize(&mut state.temporary, entry, today, &character_ids);
         }
         if candidate.entries.len() > 1 {
             memorize(
                 &mut state.temporary,
                 join_entries(&candidate.entries),
                 today,
+                &character_ids,
             );
         }
         Ok(())
@@ -200,14 +211,20 @@ impl LearningMemory {
         let update_start = prefix.len();
         prefix.extend(update.iter().cloned());
         let today = state.today;
+        let character_ids = state.character_ids.clone();
         for entry in update.iter().filter(|entry| learns_individual_word(entry)) {
-            memorize(&mut state.temporary, entry.clone(), today);
+            memorize(&mut state.temporary, entry.clone(), today, &character_ids);
         }
         for entry in learned_clause_entries_after(&prefix, update_start) {
-            memorize(&mut state.temporary, entry, today);
+            memorize(&mut state.temporary, entry, today, &character_ids);
         }
         if prefix.len() > 1 {
-            memorize(&mut state.temporary, join_entries(&prefix), today);
+            memorize(
+                &mut state.temporary,
+                join_entries(&prefix),
+                today,
+                &character_ids,
+            );
         }
         Ok(())
     }
@@ -217,43 +234,48 @@ impl LearningMemory {
         if !state.mode.updates_memory() {
             return Ok(());
         }
-        let targets: std::collections::HashSet<_> = candidate
+        let temporary_targets: HashSet<_> = candidate
             .entries
             .iter()
             .map(|entry| (entry.ruby.clone(), entry.word.clone()))
             .collect();
+        let persistent_targets: HashSet<_> = candidate
+            .entries
+            .iter()
+            .map(|entry| entry.word.clone())
+            .collect();
         state.temporary.retain(|record| {
-            !targets.contains(&(record.entry.ruby.clone(), record.entry.word.clone()))
+            !temporary_targets.contains(&(record.entry.ruby.clone(), record.entry.word.clone()))
         });
-        state.persisted.retain(|record| {
-            !targets.contains(&(record.entry.ruby.clone(), record.entry.word.clone()))
-        });
+        state
+            .persisted
+            .retain(|record| !persistent_targets.contains(&record.entry.word));
         save_locked(&mut state)
     }
 
     pub fn commit(&self) -> Result<bool, LearningError> {
         let mut state = self.lock()?;
-        if !state.mode.updates_memory() || state.temporary.is_empty() {
+        if !state.mode.updates_memory() {
             return Ok(false);
         }
+        let changed = !state.temporary.is_empty();
         let temporary = std::mem::take(&mut state.temporary);
         for record in temporary {
             merge_record(&mut state.persisted, record);
         }
         save_locked(&mut state)?;
-        Ok(true)
+        Ok(changed)
     }
 
     pub fn reset(&self) -> Result<(), LearningError> {
         let mut state = self.lock()?;
         state.persisted.clear();
         state.temporary.clear();
-        for file in [MEMORY_FILE, TEMPORARY_FILE, PAUSE_FILE] {
-            let path = state.directory.join(file);
-            match fs::remove_file(&path) {
-                Ok(()) => {}
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(source) => return Err(LearningError::Io { path, source }),
+        for entry in read_directory(&state.directory)? {
+            let path = entry.path();
+            let name = entry.file_name();
+            if is_memory_file(&name.to_string_lossy()) {
+                remove_file_if_present(&path)?;
             }
         }
         Ok(())
@@ -327,8 +349,13 @@ fn join_entries(entries: &[DictionaryEntry]) -> DictionaryEntry {
     }
 }
 
-fn memorize(records: &mut Vec<LearningRecord>, entry: DictionaryEntry, today: u16) {
-    if !valid_learning_entry(&entry) {
+fn memorize(
+    records: &mut Vec<LearningRecord>,
+    entry: DictionaryEntry,
+    today: u16,
+    character_ids: &CharacterIdMap,
+) {
+    if !valid_learning_entry(&entry, character_ids) {
         return;
     }
     if let Some(record) = records
@@ -348,8 +375,11 @@ fn memorize(records: &mut Vec<LearningRecord>, entry: DictionaryEntry, today: u1
     }
 }
 
-fn valid_learning_entry(entry: &DictionaryEntry) -> bool {
-    !entry.word.chars().any(char::is_control) && !entry.ruby.chars().any(char::is_control)
+fn valid_learning_entry(entry: &DictionaryEntry, character_ids: &CharacterIdMap) -> bool {
+    !entry.word.chars().any(char::is_control)
+        && !entry.ruby.is_empty()
+        && !entry.ruby.chars().any(char::is_control)
+        && character_ids.encode(&entry.ruby).is_some()
 }
 
 fn merge_record(records: &mut Vec<LearningRecord>, incoming: LearningRecord) {
@@ -428,26 +458,26 @@ fn save_locked(state: &mut LearningState) -> Result<(), LearningError> {
         .persisted
         .sort_by_key(|record| std::cmp::Reverse(record.last_used_day));
     state.persisted.truncate(state.max_count);
-    let bytes = encode(&state.persisted);
-    let temporary = state.directory.join(TEMPORARY_FILE);
-    fs::write(&temporary, bytes).map_err(|source| LearningError::Io {
-        path: temporary.clone(),
-        source,
-    })?;
+    let files = encode_files(&state.persisted, &state.character_ids);
+    write_temporary(&state.directory, LOUDS_FILE, &files.louds)?;
+    write_temporary(&state.directory, LOUDS_CHARS_FILE, &files.characters)?;
+    write_temporary(&state.directory, METADATA_FILE, &files.metadata)?;
+    for (index, shard) in files.shards.iter().enumerate() {
+        write_temporary(&state.directory, &shard_file(index), shard)?;
+    }
     let pause = state.directory.join(PAUSE_FILE);
     fs::write(&pause, []).map_err(|source| LearningError::Io {
         path: pause.clone(),
         source,
     })?;
-    let memory = state.directory.join(MEMORY_FILE);
-    fs::copy(&temporary, &memory).map_err(|source| LearningError::Io {
-        path: memory,
-        source,
-    })?;
-    fs::remove_file(&pause).map_err(|source| LearningError::Io {
-        path: pause,
-        source,
-    })?;
+    restore_temporary(&state.directory, LOUDS_CHARS_FILE)?;
+    restore_temporary(&state.directory, METADATA_FILE)?;
+    for index in 0..files.shards.len() {
+        restore_temporary(&state.directory, &shard_file(index))?;
+    }
+    // The LOUDS topology is the first file read by upstream, so publish it last.
+    restore_temporary(&state.directory, LOUDS_FILE)?;
+    remove_file_if_present(&pause)?;
     Ok(())
 }
 
@@ -456,94 +486,320 @@ fn recover_if_paused(directory: &Path) -> Result<(), LearningError> {
     if !pause.exists() {
         return Ok(());
     }
-    let temporary = directory.join(TEMPORARY_FILE);
-    let memory = directory.join(MEMORY_FILE);
-    fs::copy(&temporary, &memory).map_err(|source| LearningError::Io {
-        path: memory,
-        source,
-    })?;
-    fs::remove_file(&pause).map_err(|source| LearningError::Io {
-        path: pause,
-        source,
-    })?;
+    restore_temporary(directory, LOUDS_CHARS_FILE)?;
+    restore_temporary(directory, METADATA_FILE)?;
+    let mut shards = read_directory(directory)?
+        .into_iter()
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .filter(|name| name.starts_with("memory") && name.ends_with(".loudstxt3.2"))
+        .collect::<Vec<_>>();
+    shards.sort();
+    for temporary in shards {
+        restore_temporary(directory, temporary.trim_end_matches(".2"))?;
+    }
+    restore_temporary(directory, LOUDS_FILE)?;
+    remove_file_if_present(&pause)?;
     Ok(())
 }
 
-fn encode(records: &[LearningRecord]) -> Vec<u8> {
-    let mut output = MAGIC.to_vec();
-    output.extend(
-        u32::try_from(records.len())
-            .unwrap_or(u32::MAX)
-            .to_le_bytes(),
-    );
-    for record in records {
-        output.extend(record.last_used_day.to_le_bytes());
-        output.extend(record.last_updated_day.to_le_bytes());
-        output.push(record.count);
-        write_string(&mut output, &record.entry.word);
-        write_string(&mut output, &record.entry.ruby);
-        output.extend(record.entry.left_id.to_le_bytes());
-        output.extend(record.entry.right_id.to_le_bytes());
-        output.extend(record.entry.meaning_id.to_le_bytes());
-        output.extend(record.entry.base_value.to_le_bytes());
+struct EncodedMemory {
+    louds: Vec<u8>,
+    characters: Vec<u8>,
+    metadata: Vec<u8>,
+    shards: Vec<Vec<u8>>,
+}
+
+#[derive(Default)]
+struct MemoryTrieNode {
+    children: BTreeMap<u8, usize>,
+    record_indices: Vec<usize>,
+}
+
+fn encode_files(records: &[LearningRecord], character_ids: &CharacterIdMap) -> EncodedMemory {
+    let mut nodes = vec![MemoryTrieNode::default()];
+    for (record_index, record) in records.iter().enumerate() {
+        let Some(characters) = character_ids.encode(&record.entry.ruby) else {
+            continue;
+        };
+        let mut node_index = 0;
+        for character in characters {
+            let next = if let Some(next) = nodes[node_index].children.get(&character) {
+                *next
+            } else {
+                let next = nodes.len();
+                nodes.push(MemoryTrieNode::default());
+                nodes[node_index].children.insert(character, next);
+                next
+            };
+            node_index = next;
+        }
+        if nodes[node_index].record_indices.len() < u8::MAX as usize {
+            nodes[node_index].record_indices.push(record_index);
+        }
+    }
+
+    let mut bits = vec![true, false];
+    let mut characters = vec![0, 0];
+    let mut blocks = vec![Vec::new(), Vec::new()];
+    let mut metadata_blocks = vec![Vec::new(), Vec::new()];
+    let mut current = nodes[0]
+        .children
+        .iter()
+        .map(|(character, index)| (*character, *index))
+        .collect::<Vec<_>>();
+    bits.extend(std::iter::repeat_n(true, current.len()));
+    bits.push(false);
+    while !current.is_empty() {
+        for (character, node_index) in &current {
+            characters.push(*character);
+            blocks.push(nodes[*node_index].record_indices.clone());
+            metadata_blocks.push(nodes[*node_index].record_indices.clone());
+            bits.extend(std::iter::repeat_n(true, nodes[*node_index].children.len()));
+            bits.push(false);
+        }
+        current = current
+            .into_iter()
+            .flat_map(|(_, node_index)| {
+                nodes[node_index]
+                    .children
+                    .iter()
+                    .map(|(character, index)| (*character, *index))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+    }
+
+    let mut metadata = u32::try_from(metadata_blocks.len())
+        .unwrap_or(u32::MAX)
+        .to_le_bytes()
+        .to_vec();
+    for block in metadata_blocks {
+        metadata.push(u8::try_from(block.len()).unwrap_or(u8::MAX));
+        for index in block {
+            let record = &records[index];
+            metadata.extend(record.last_used_day.to_le_bytes());
+            metadata.extend(record.last_updated_day.to_le_bytes());
+            metadata.push(record.count);
+            // Swift's MetadataElement has two-byte alignment and a one-byte tail pad.
+            metadata.push(0);
+        }
+    }
+
+    let shards = blocks
+        .chunks(SHARD_SIZE)
+        .map(|blocks| encode_entry_shard(blocks, records))
+        .collect();
+    EncodedMemory {
+        louds: encode_louds(&bits),
+        characters,
+        metadata,
+        shards,
+    }
+}
+
+fn encode_louds(bits: &[bool]) -> Vec<u8> {
+    let mut output = Vec::new();
+    for chunk in bits.chunks(64) {
+        let mut word = 0_u64;
+        for (index, value) in chunk.iter().enumerate() {
+            if *value {
+                word |= 1 << (63 - index);
+            }
+        }
+        for index in chunk.len()..64 {
+            word |= 1 << (63 - index);
+        }
+        output.extend(word.to_le_bytes());
     }
     output
 }
 
-fn decode(bytes: &[u8]) -> Result<Vec<LearningRecord>, LearningError> {
-    if !bytes.starts_with(MAGIC) {
-        return Err(LearningError::InvalidData("bad magic"));
+fn encode_entry_shard(blocks: &[Vec<usize>], records: &[LearningRecord]) -> Vec<u8> {
+    let payloads = blocks
+        .iter()
+        .map(|indices| encode_entry_block(indices, records))
+        .collect::<Vec<_>>();
+    let mut output = Vec::new();
+    output.extend(
+        u16::try_from(payloads.len())
+            .unwrap_or(u16::MAX)
+            .to_le_bytes(),
+    );
+    let mut offset = 2 + payloads.len() * 4;
+    for payload in &payloads {
+        output.extend(u32::try_from(offset).unwrap_or(u32::MAX).to_le_bytes());
+        offset = offset.saturating_add(payload.len());
     }
-    let mut cursor = MAGIC.len();
-    let count = read_u32(bytes, &mut cursor)? as usize;
-    let mut records = Vec::with_capacity(count);
-    for _ in 0..count {
-        let last_used_day = read_u16(bytes, &mut cursor)?;
-        let last_updated_day = read_u16(bytes, &mut cursor)?;
-        let count = *bytes
+    for payload in payloads {
+        output.extend(payload);
+    }
+    output
+}
+
+fn encode_entry_block(indices: &[usize], records: &[LearningRecord]) -> Vec<u8> {
+    let mut output = Vec::new();
+    output.extend(
+        u16::try_from(indices.len())
+            .unwrap_or(u16::MAX)
+            .to_le_bytes(),
+    );
+    for index in indices {
+        let record = &records[*index];
+        output.extend(record.entry.left_id.to_le_bytes());
+        output.extend(record.entry.right_id.to_le_bytes());
+        output.extend(record.entry.meaning_id.to_le_bytes());
+        output.extend(learning_value(record.count, &record.entry.ruby).to_le_bytes());
+    }
+    let ruby = indices
+        .first()
+        .map(|index| records[*index].entry.ruby.as_str())
+        .unwrap_or("");
+    output.extend(ruby.as_bytes());
+    for index in indices {
+        output.push(b'\t');
+        let word = &records[*index].entry.word;
+        if word != ruby {
+            output.extend(word.as_bytes());
+        }
+    }
+    output
+}
+
+fn decode_directory(directory: &Path) -> Result<Vec<LearningRecord>, LearningError> {
+    let Some(metadata) = read_optional(&directory.join(METADATA_FILE))? else {
+        return Ok(Vec::new());
+    };
+    let louds_bytes = read_required(&directory.join(LOUDS_FILE))?;
+    let characters = read_required(&directory.join(LOUDS_CHARS_FILE))?;
+    let louds = Louds::parse(&louds_bytes, &characters)
+        .map_err(|_| LearningError::InvalidData("invalid LOUDS topology"))?;
+    let mut cursor = 0;
+    let node_count = read_u32(&metadata, &mut cursor)? as usize;
+    if node_count != characters.len() || node_count != louds.node_count() {
+        return Err(LearningError::InvalidData("inconsistent node counts"));
+    }
+    let mut metadata_blocks = Vec::with_capacity(node_count);
+    for _ in 0..node_count {
+        let count = *metadata
             .get(cursor)
-            .ok_or(LearningError::InvalidData("truncated count"))?;
+            .ok_or(LearningError::InvalidData("truncated metadata block"))?
+            as usize;
         cursor += 1;
-        let word = read_string(bytes, &mut cursor)?;
-        let ruby = read_string(bytes, &mut cursor)?;
-        let left_id = read_u16(bytes, &mut cursor)?;
-        let right_id = read_u16(bytes, &mut cursor)?;
-        let meaning_id = read_u16(bytes, &mut cursor)?;
-        let base_value = f32::from_le_bytes(read_array(bytes, &mut cursor)?);
-        records.push(LearningRecord {
-            entry: DictionaryEntry {
-                word,
-                ruby,
-                left_id,
-                right_id,
-                meaning_id,
-                base_value,
-                adjustment: 0.0,
-                metadata: DictionaryMetadata::default(),
-            },
-            last_used_day,
-            last_updated_day,
-            count,
-        });
+        let mut block = Vec::with_capacity(count);
+        for _ in 0..count {
+            let last_used_day = read_u16(&metadata, &mut cursor)?;
+            let last_updated_day = read_u16(&metadata, &mut cursor)?;
+            let count = *metadata
+                .get(cursor)
+                .ok_or(LearningError::InvalidData("truncated metadata count"))?;
+            cursor += METADATA_ELEMENT_SIZE - 4;
+            block.push((last_used_day, last_updated_day, count));
+        }
+        metadata_blocks.push(block);
     }
-    if cursor != bytes.len() {
-        return Err(LearningError::InvalidData("trailing bytes"));
+    if cursor != metadata.len() {
+        return Err(LearningError::InvalidData("trailing metadata bytes"));
+    }
+
+    let mut records = Vec::new();
+    let mut loaded_shard = usize::MAX;
+    let mut shard = Vec::new();
+    for (node, block) in metadata_blocks.into_iter().enumerate() {
+        let shard_index = node / SHARD_SIZE;
+        if shard_index != loaded_shard {
+            shard = read_required(&directory.join(shard_file(shard_index)))?;
+            loaded_shard = shard_index;
+        }
+        let entries = parse_entry_shard(&shard, [node % SHARD_SIZE])
+            .map_err(|_| LearningError::InvalidData("invalid learning entry shard"))?;
+        if entries.len() != block.len() {
+            return Err(LearningError::InvalidData(
+                "entry and metadata counts differ",
+            ));
+        }
+        records.extend(entries.into_iter().zip(block).map(
+            |(entry, (last_used_day, last_updated_day, count))| LearningRecord {
+                entry,
+                last_used_day,
+                last_updated_day,
+                count,
+            },
+        ));
     }
     Ok(records)
 }
 
-fn write_string(output: &mut Vec<u8>, value: &str) {
-    output.extend(u32::try_from(value.len()).unwrap_or(u32::MAX).to_le_bytes());
-    output.extend(value.as_bytes());
+fn write_temporary(directory: &Path, name: &str, bytes: &[u8]) -> Result<(), LearningError> {
+    let path = directory.join(format!("{name}.2"));
+    fs::write(&path, bytes).map_err(|source| LearningError::Io { path, source })
 }
 
-fn read_string(bytes: &[u8], cursor: &mut usize) -> Result<String, LearningError> {
-    let length = read_u32(bytes, cursor)? as usize;
-    let value = bytes
-        .get(*cursor..cursor.saturating_add(length))
-        .ok_or(LearningError::InvalidData("truncated string"))?;
-    *cursor += length;
-    String::from_utf8(value.to_vec()).map_err(|_| LearningError::InvalidData("invalid UTF-8"))
+fn restore_temporary(directory: &Path, name: &str) -> Result<(), LearningError> {
+    let source_path = directory.join(format!("{name}.2"));
+    let destination = directory.join(name);
+    fs::copy(&source_path, &destination)
+        .map(|_| ())
+        .map_err(|source| LearningError::Io {
+            path: destination,
+            source,
+        })
+}
+
+fn shard_file(index: usize) -> String {
+    format!("memory{index}.loudstxt3")
+}
+
+fn read_required(path: &Path) -> Result<Vec<u8>, LearningError> {
+    fs::read(path).map_err(|source| LearningError::Io {
+        path: path.to_owned(),
+        source,
+    })
+}
+
+fn read_optional(path: &Path) -> Result<Option<Vec<u8>>, LearningError> {
+    match fs::read(path) {
+        Ok(value) => Ok(Some(value)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(source) => Err(LearningError::Io {
+            path: path.to_owned(),
+            source,
+        }),
+    }
+}
+
+fn read_directory(path: &Path) -> Result<Vec<fs::DirEntry>, LearningError> {
+    fs::read_dir(path)
+        .and_then(Iterator::collect)
+        .map_err(|source| LearningError::Io {
+            path: path.to_owned(),
+            source,
+        })
+}
+
+fn remove_file_if_present(path: &Path) -> Result<(), LearningError> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(LearningError::Io {
+            path: path.to_owned(),
+            source,
+        }),
+    }
+}
+
+fn is_memory_file(name: &str) -> bool {
+    name == PAUSE_FILE
+        || name == "memory.bin"
+        || name == "memory.bin.2"
+        || name.ends_with(".loudstxt3")
+        || name.ends_with(".loudstxt3.2")
+        || name.ends_with(".loudschars2")
+        || name.ends_with(".loudschars2.2")
+        || name.ends_with(".memorymetadata")
+        || name.ends_with(".memorymetadata.2")
+        || name.ends_with(".louds")
+        || name.ends_with(".louds.2")
+        || name.ends_with("learningMemory.txt")
 }
 
 fn read_u16(bytes: &[u8], cursor: &mut usize) -> Result<u16, LearningError> {
@@ -577,10 +833,39 @@ fn current_day() -> u16 {
 mod tests {
     use super::*;
 
+    fn character_ids() -> CharacterIdMap {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("data/azooKey_dictionary_storage/Dictionary/louds/charID.chid");
+        CharacterIdMap::parse(&fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    fn temporary_directory(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "beankey-{name}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    fn write_encoded_files(directory: &Path, files: &EncodedMemory) {
+        fs::create_dir_all(directory).unwrap();
+        fs::write(directory.join(LOUDS_FILE), &files.louds).unwrap();
+        fs::write(directory.join(LOUDS_CHARS_FILE), &files.characters).unwrap();
+        fs::write(directory.join(METADATA_FILE), &files.metadata).unwrap();
+        for (index, shard) in files.shards.iter().enumerate() {
+            fs::write(directory.join(shard_file(index)), shard).unwrap();
+        }
+    }
+
     fn memory(mode: LearningMode, persisted: Vec<LearningRecord>) -> LearningMemory {
         LearningMemory {
             inner: Arc::new(Mutex::new(LearningState {
                 directory: PathBuf::new(),
+                character_ids: character_ids(),
                 mode,
                 max_count: 128,
                 today: 10,
@@ -618,16 +903,34 @@ mod tests {
     }
 
     #[test]
-    fn round_trips_the_private_persistence_format() {
+    fn round_trips_the_upstream_persistence_format() {
         let records = vec![LearningRecord {
             entry: entry("単語", "タンゴ"),
             last_used_day: 10,
             last_updated_day: 9,
             count: 3,
         }];
-        let decoded = decode(&encode(&records)).unwrap();
+        let directory = temporary_directory("learning-round-trip");
+        let files = encode_files(&records, &character_ids());
+        write_encoded_files(&directory, &files);
+        let decoded = decode_directory(&directory).unwrap();
+        fs::remove_dir_all(directory).unwrap();
+
         assert_eq!(decoded[0].entry.word, "単語");
         assert_eq!(decoded[0].count, 3);
+        assert_eq!(
+            files.metadata.len(),
+            4 + files.characters.len() + METADATA_ELEMENT_SIZE
+        );
+        assert_eq!(
+            &files.metadata[..4],
+            &u32::try_from(files.characters.len()).unwrap().to_le_bytes()
+        );
+        assert_eq!(
+            &files.metadata[files.metadata.len() - METADATA_ELEMENT_SIZE..],
+            &[10, 0, 9, 0, 3, 0]
+        );
+        assert!(Louds::parse(&files.louds, &files.characters).is_ok());
     }
 
     #[test]
@@ -657,19 +960,63 @@ mod tests {
     }
 
     #[test]
-    fn disabled_learning_ignores_corrupt_persistence() {
-        let directory = std::env::temp_dir().join(format!(
-            "beankey-disabled-learning-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+    fn forgets_a_persisted_surface_across_all_readings_and_parts_of_speech() {
+        let directory = temporary_directory("coarse-forget");
         fs::create_dir_all(&directory).unwrap();
-        fs::write(directory.join(MEMORY_FILE), b"corrupt").unwrap();
+        let mut first = entry("表層", "ヒョウソウ");
+        first.left_id = 1_285;
+        first.right_id = 1_285;
+        let mut second = entry("表層", "オモテソウ");
+        second.left_id = 1_288;
+        second.right_id = 1_288;
+        let persisted = [first, second]
+            .into_iter()
+            .map(|entry| LearningRecord {
+                entry,
+                last_used_day: 10,
+                last_updated_day: 10,
+                count: 1,
+            })
+            .collect();
+        let memory = LearningMemory {
+            inner: Arc::new(Mutex::new(LearningState {
+                directory: directory.clone(),
+                character_ids: character_ids(),
+                mode: LearningMode::InputAndOutput,
+                max_count: 128,
+                today: 10,
+                persisted,
+                temporary: Vec::new(),
+            })),
+        };
+        let target = Candidate::single(
+            "表層".into(),
+            -12.0,
+            crate::ComposingCount::Surface(4),
+            501,
+            vec![entry("表層", "ヒョウソウ")],
+        );
 
-        let disabled = LearningMemory::open(&directory, LearningMode::Nothing, 128).unwrap();
+        memory.forget(&target).unwrap();
+        fs::remove_dir_all(directory).unwrap();
+
+        assert!(
+            memory
+                .entries()
+                .unwrap()
+                .iter()
+                .all(|entry| entry.word != "表層")
+        );
+    }
+
+    #[test]
+    fn disabled_learning_ignores_corrupt_persistence() {
+        let directory = temporary_directory("disabled-learning");
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join(METADATA_FILE), b"corrupt").unwrap();
+
+        let disabled =
+            LearningMemory::open(&directory, LearningMode::Nothing, 128, character_ids()).unwrap();
         assert!(disabled.entries().unwrap().is_empty());
         disabled.reset().unwrap();
         fs::remove_dir_all(directory).unwrap();
@@ -677,15 +1024,7 @@ mod tests {
 
     #[test]
     fn ignores_control_text_in_existing_learning_memory() {
-        let directory = std::env::temp_dir().join(format!(
-            "beankey-control-learning-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(&directory).unwrap();
+        let directory = temporary_directory("control-learning");
         let today = current_day();
         let records = [("正常", "セイジョウ"), ("\r", "\r"), ("語\t", "ゴ\t")]
             .into_iter()
@@ -696,9 +1035,11 @@ mod tests {
                 count: 1,
             })
             .collect::<Vec<_>>();
-        fs::write(directory.join(MEMORY_FILE), encode(&records)).unwrap();
+        write_encoded_files(&directory, &encode_files(&records, &character_ids()));
 
-        let recovered = LearningMemory::open(&directory, LearningMode::OnlyOutput, 128).unwrap();
+        let recovered =
+            LearningMemory::open(&directory, LearningMode::OnlyOutput, 128, character_ids())
+                .unwrap();
         let entries = recovered.entries().unwrap();
         fs::remove_dir_all(directory).unwrap();
 

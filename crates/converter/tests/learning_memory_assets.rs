@@ -29,7 +29,13 @@ fn learns_persists_recovers_forgets_and_resets_selected_candidates() {
     let dictionary = DictionaryStore::open(dictionary_root()).unwrap();
     let converter = NormalConverter::new(&dictionary);
     let tables = InputTableRegistry::new();
-    let memory = LearningMemory::open(&directory, LearningMode::InputAndOutput, 128).unwrap();
+    let memory = LearningMemory::open(
+        &directory,
+        LearningMode::InputAndOutput,
+        128,
+        dictionary.character_ids().clone(),
+    )
+    .unwrap();
     let mut session = ConversionSession::new();
     session.set_learning_memory(memory.clone()).unwrap();
     session.insert_str("しかい", InputStyle::Direct, &tables);
@@ -42,9 +48,15 @@ fn learns_persists_recovers_forgets_and_resets_selected_candidates() {
     session.select_candidate(index, &tables).unwrap();
     assert!(session.commit_learning().unwrap());
 
-    fs::remove_file(directory.join("memory.bin")).unwrap();
+    fs::remove_file(directory.join("memory.louds")).unwrap();
     fs::write(directory.join(".pause"), []).unwrap();
-    let recovered = LearningMemory::open(&directory, LearningMode::OnlyOutput, 128).unwrap();
+    let recovered = LearningMemory::open(
+        &directory,
+        LearningMode::OnlyOutput,
+        128,
+        dictionary.character_ids().clone(),
+    )
+    .unwrap();
     let mut next_session = ConversionSession::new();
     next_session.set_learning_memory(recovered).unwrap();
     next_session.insert_str("しかい", InputStyle::Direct, &tables);
