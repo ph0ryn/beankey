@@ -20,6 +20,11 @@ let
             optionDirectFullWidthInput = true;
             punctuationStyle = "period_and_comma";
           };
+          zenz.personalization = {
+            baseNgram = "/nix/store/beankey-base-ngram/lm";
+            personalNgram = "/nix/store/beankey-personal-ngram/lm";
+            alpha = 1.5;
+          };
         };
         system.stateVersion = "26.05";
       }
@@ -93,6 +98,9 @@ in
     grep -F 'max_count = 65536' "$config"
     grep -F 'inference_limit = 5' "$config"
     grep -F 'enable_alignment_separator = true' "$config"
+    grep -F 'base_ngram = "/nix/store/beankey-base-ngram/lm"' "$config"
+    grep -F 'personal_ngram = "/nix/store/beankey-personal-ngram/lm"' "$config"
+    grep -F 'alpha = 1.5' "$config"
     touch "$out"
   '';
 }

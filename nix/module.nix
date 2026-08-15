@@ -57,7 +57,7 @@ let
       };
       alpha = mkOption {
         type = types.float;
-        default = 0.5;
+        default = 1.0;
         description = "Interpolation strength for the personal language model.";
       };
     };
@@ -390,10 +390,8 @@ in
         message = "programs.beankey.conversion.customInputTable must name a registered table when inputStyle is custom";
       }
       {
-        assertion =
-          cfg.zenz.personalization == null
-          || (cfg.zenz.personalization.alpha >= 0.0 && cfg.zenz.personalization.alpha <= 1.0);
-        message = "programs.beankey.zenz.personalization.alpha must be between 0 and 1";
+        assertion = cfg.zenz.personalization == null || cfg.zenz.personalization.alpha >= 0.0;
+        message = "programs.beankey.zenz.personalization.alpha must be nonnegative";
       }
       {
         assertion = cfg.lmTypo.languageModel != "ngram" || cfg.lmTypo.ngram != null;
