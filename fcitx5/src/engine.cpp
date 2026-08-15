@@ -1,5 +1,7 @@
 #include "engine.h"
 
+#include "key_event.h"
+
 #include <fcitx-utils/capabilityflags.h>
 #include <fcitx-utils/key.h>
 #include <fcitx-utils/keysym.h>
@@ -27,7 +29,6 @@ namespace fcitx {
 namespace {
 
 constexpr std::uint32_t kProtocolVersion = 1;
-constexpr std::uint32_t kShiftModifier = 1;
 constexpr std::uint32_t kCandidatePageSize = 10;
 constexpr auto kStartupTimeout = std::chrono::milliseconds(5000);
 
@@ -118,20 +119,7 @@ bool BeankeyState::processKey(KeyEvent &event) {
 
   auto request = envelope();
   auto *key = request.mutable_key_event();
-  key->set_key_sym(event.rawKey().sym());
-  key->set_release(event.isRelease());
-  if (event.rawKey().states().test(KeyState::Shift)) {
-    key->set_modifiers(kShiftModifier);
-  }
-  const KeyStates shortcutModifiers({KeyState::Ctrl, KeyState::Alt,
-                                     KeyState::Super, KeyState::Super2,
-                                     KeyState::Hyper, KeyState::Meta});
-  if (!event.key().states().testAny(shortcutModifiers)) {
-    key->set_text(Key::keySymToUTF8(event.key().sym()));
-  }
-  const std::string rawText = Key::keySymToUTF8(event.rawKey().sym());
-  key->set_input(key->text().empty() ? rawText : key->text());
-  key->set_intention(rawText);
+  beankey::populateKeyEvent(event, key);
   fillSurroundingText(key->mutable_surrounding_text());
 
   std::vector<beankey::v1::CursorAction> actions;

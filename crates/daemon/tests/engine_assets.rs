@@ -38,6 +38,122 @@ fn response(envelope: protocol::Envelope) -> protocol::StateResponse {
     }
 }
 
+fn start_roman_session(engine: &mut Engine, request_id: u64) {
+    response(engine.handle(envelope(
+        request_id,
+        Payload::StartSession(protocol::StartSession {
+            input_style: protocol::InputStyle::RomanToKana as i32,
+            surrounding_text: None,
+            keyboard_language: protocol::KeyboardLanguage::Japanese as i32,
+            custom_input_table: String::new(),
+        }),
+    )));
+}
+
+#[test]
+fn does_not_turn_control_key_text_into_composition() {
+    let mut engine = Engine::open(dictionary_root()).unwrap();
+    start_roman_session(&mut engine, 1);
+
+    for (index, (name, key_sym, text)) in [
+        ("BackSpace", 0xff08, "\u{8}"),
+        ("Return", 0xff0d, "\r"),
+        ("KP_Enter", 0xff8d, "\r"),
+        ("Escape", 0xff1b, "\u{1b}"),
+        ("Tab", 0xff09, "\t"),
+        ("Delete", 0xffff, "\u{7f}"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let request_id = index as u64 * 2 + 2;
+        let state = response(engine.handle(envelope(
+            request_id,
+            Payload::KeyEvent(protocol::KeyEvent {
+                key_sym,
+                text: text.into(),
+                input: text.into(),
+                intention: text.into(),
+                ..Default::default()
+            }),
+        )));
+        assert!(!state.consumed, "{name} must be returned to Fcitx5");
+        assert!(state.preedit.is_empty(), "{name} created preedit text");
+        assert!(state.commit.is_empty(), "{name} committed control text");
+
+        let reset = response(engine.handle(envelope(
+            request_id + 1,
+            Payload::ResetSession(protocol::ResetSession {}),
+        )));
+        assert!(reset.reset);
+    }
+}
+
+#[test]
+fn returns_enter_after_committing_a_candidate() {
+    let mut engine = Engine::open(dictionary_root()).unwrap();
+    start_roman_session(&mut engine, 1);
+    let converted = response(engine.handle(envelope(
+        2,
+        Payload::KeyEvent(protocol::KeyEvent {
+            text: "shikai".into(),
+            ..Default::default()
+        }),
+    )));
+    let index = converted
+        .candidates
+        .iter()
+        .position(|candidate| candidate.text == "司会")
+        .unwrap();
+    let committed = response(engine.handle(envelope(
+        3,
+        Payload::SelectCandidate(protocol::SelectCandidate {
+            index: index as u32,
+        }),
+    )));
+    assert_eq!(committed.commit, "司会");
+    assert!(!committed.candidates.is_empty());
+
+    let enter = response(engine.handle(envelope(
+        4,
+        Payload::KeyEvent(protocol::KeyEvent {
+            key_sym: 0xff0d,
+            ..Default::default()
+        }),
+    )));
+    assert!(
+        !enter.consumed,
+        "Enter selected a post-composition prediction"
+    );
+    assert!(enter.commit.is_empty());
+    assert!(enter.preedit.is_empty());
+}
+
+#[test]
+fn does_not_persist_control_key_text_in_learning_memory() {
+    let state = TempDir::new().unwrap();
+    let mut engine = Engine::open_with_learning(dictionary_root(), state.path()).unwrap();
+    start_roman_session(&mut engine, 1);
+
+    for request_id in 2..=3 {
+        response(engine.handle(envelope(
+            request_id,
+            Payload::KeyEvent(protocol::KeyEvent {
+                key_sym: 0xff0d,
+                text: "\r".into(),
+                input: "\r".into(),
+                intention: "\r".into(),
+                ..Default::default()
+            }),
+        )));
+    }
+
+    assert!(
+        !state.path().join("memory.bin").exists(),
+        "control key text reached persistent learning memory"
+    );
+}
+
 #[test]
 fn converts_selects_commits_and_resets_a_session() {
     let mut engine = Engine::open(dictionary_root()).unwrap();
