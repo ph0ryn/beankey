@@ -50,6 +50,38 @@ fn start_roman_session(engine: &mut Engine, request_id: u64) {
     )));
 }
 
+#[test]
+fn advertises_only_configured_addon_capabilities() {
+    let mut stateless = Engine::open(dictionary_root()).unwrap();
+    let stateless_start = response(stateless.handle(envelope(
+        1,
+        Payload::StartSession(protocol::StartSession {
+            input_style: protocol::InputStyle::RomanToKana as i32,
+            surrounding_text: None,
+            keyboard_language: protocol::KeyboardLanguage::Japanese as i32,
+            custom_input_table: String::new(),
+        }),
+    )));
+    assert!(!stateless_start.lm_typo_available);
+    assert!(!stateless_start.learning_available);
+    assert!(!stateless_start.learning_writable);
+
+    let state = TempDir::new().unwrap();
+    let mut learning = Engine::open_with_learning(dictionary_root(), state.path()).unwrap();
+    let learning_start = response(learning.handle(envelope(
+        1,
+        Payload::StartSession(protocol::StartSession {
+            input_style: protocol::InputStyle::RomanToKana as i32,
+            surrounding_text: None,
+            keyboard_language: protocol::KeyboardLanguage::Japanese as i32,
+            custom_input_table: String::new(),
+        }),
+    )));
+    assert!(!learning_start.lm_typo_available);
+    assert!(learning_start.learning_available);
+    assert!(learning_start.learning_writable);
+}
+
 fn key_event(key_sym: u32, text: &str) -> protocol::KeyEvent {
     protocol::KeyEvent {
         key_sym,

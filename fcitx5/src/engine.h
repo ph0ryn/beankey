@@ -1,5 +1,6 @@
 #pragma once
 
+#include <fcitx/action.h>
 #include <fcitx/inputcontextproperty.h>
 #include <fcitx/inputmethodengine.h>
 
@@ -29,6 +30,12 @@ public:
   void focusOut(bool commitComposition = false);
   bool processKey(KeyEvent &event);
   bool selectCandidate(std::uint32_t index);
+  bool selectTypoCorrection(std::uint32_t index);
+  bool forgetCandidate(std::uint32_t index);
+  bool resetLearning();
+  bool requestTypoCorrections();
+  bool learningAvailable() const;
+  bool learningWritable() const;
   void reset();
 
 private:
@@ -39,6 +46,7 @@ private:
             const std::vector<beankey::v1::CursorAction> &commitActions = {});
   bool apply(const beankey::v1::Envelope &response,
              const std::vector<beankey::v1::CursorAction> &commitActions);
+  void showTypoCorrections(const beankey::v1::TypoCorrectionResponse &response);
   void fillSurroundingText(beankey::v1::SurroundingText *surrounding) const;
   void clearUi();
   void failSession();
@@ -50,6 +58,9 @@ private:
   std::uint64_t nextRequestId_ = 1;
   bool started_ = false;
   std::int32_t selectedCandidate_ = -1;
+  bool lmTypoAvailable_ = false;
+  bool learningAvailable_ = false;
+  bool learningWritable_ = false;
   std::vector<std::vector<beankey::v1::CursorAction>> candidateActions_;
 };
 
@@ -73,6 +84,7 @@ private:
   Instance *instance_;
   beankey::Client client_;
   FactoryFor<BeankeyState> factory_;
+  SimpleAction resetLearningAction_;
 };
 
 } // namespace fcitx

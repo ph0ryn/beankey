@@ -72,6 +72,10 @@ message ResetLearning {}
 
 message RequestTypoCorrections {}
 
+message SelectTypoCorrection {
+  uint32 index = 1;
+}
+
 message ComposingCount {
   oneof count {
     uint32 input = 1;
@@ -104,6 +108,9 @@ message StateResponse {
   sint32 selected_candidate = 5;
   string commit = 6;
   bool reset = 7;
+  bool lm_typo_available = 8;
+  bool learning_available = 9;
+  bool learning_writable = 10;
 }
 
 message TypoCorrectionCandidate {
@@ -159,6 +166,7 @@ message Envelope {
     StateResponse state_response = 20;
     ProtocolError protocol_error = 21;
     TypoCorrectionResponse typo_correction_response = 22;
+    SelectTypoCorrection select_typo_correction = 23;
   }
 
   repeated TraceEvent trace = 30;

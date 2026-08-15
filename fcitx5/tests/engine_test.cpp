@@ -15,9 +15,10 @@
 #include <fcitx/inputmethodentry.h>
 #include <fcitx/inputpanel.h>
 #include <fcitx/instance.h>
+#include <fcitx/statusarea.h>
 
+#include <algorithm>
 #include <array>
-#include <concepts>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -114,42 +115,6 @@ private:
   std::string committed_;
 };
 
-template <typename State>
-concept CanForgetCandidate = requires(State &state) {
-  { state.forgetCandidate(std::uint32_t{}) } -> std::same_as<bool>;
-};
-
-template <typename State>
-concept CanResetLearning = requires(State &state) {
-  { state.resetLearning() } -> std::same_as<bool>;
-};
-
-template <typename State>
-concept CanRequestTypoCorrections = requires(State &state) {
-  { state.requestTypoCorrections() } -> std::same_as<bool>;
-};
-
-template <typename State> bool forgetCandidate(State &state) {
-  if constexpr (CanForgetCandidate<State>) {
-    return state.forgetCandidate(0);
-  }
-  return false;
-}
-
-template <typename State> bool resetLearning(State &state) {
-  if constexpr (CanResetLearning<State>) {
-    return state.resetLearning();
-  }
-  return false;
-}
-
-template <typename State> bool requestTypoCorrections(State &state) {
-  if constexpr (CanRequestTypoCorrections<State>) {
-    return state.requestTypoCorrections();
-  }
-  return false;
-}
-
 bool report(bool condition, const char *message) {
   if (!condition) {
     std::cerr << message << '\n';
@@ -199,8 +164,14 @@ int main() {
       close(listener);
       return;
     }
-    enum class ExpectedRequest { Start, Key, Forget, ResetLearning, Typo };
-    int keyIndex = 0;
+    enum class ExpectedRequest {
+      Start,
+      Key,
+      Forget,
+      ResetLearning,
+      Typo,
+      SelectTypo
+    };
     const auto exchange = [&](ExpectedRequest expected) {
       beankey::v1::Envelope request;
       if (!request.ParseFromString(readFrame(connection))) {
@@ -218,6 +189,8 @@ int main() {
           return request.has_reset_learning();
         case ExpectedRequest::Typo:
           return request.has_request_typo_corrections();
+        case ExpectedRequest::SelectTypo:
+          return request.has_select_typo_correction();
         }
         return false;
       }();
@@ -236,24 +209,41 @@ int main() {
         candidate->set_converted_text("仮名");
       } else {
         auto *state = response.mutable_state_response();
+        state->set_lm_typo_available(true);
+        state->set_learning_available(true);
+        state->set_learning_writable(true);
         if (expected == ExpectedRequest::Start) {
           state->set_consumed(true);
-        } else if (expected == ExpectedRequest::Key && keyIndex == 0) {
+        } else if (expected == ExpectedRequest::Key &&
+                   request.key_event().key_sym() == FcitxKey_a) {
           state->set_consumed(true);
           state->set_preedit("かな");
           state->set_preedit_cursor(2);
           state->set_selected_candidate(0);
-          state->add_candidates()->set_text("司会");
-        } else if (expected == ExpectedRequest::Key && keyIndex == 1) {
+          auto *candidate = state->add_candidates();
+          candidate->set_text("司会");
+          candidate->mutable_composing_count()->set_input(1);
+        } else if (expected == ExpectedRequest::Key &&
+                   request.key_event().key_sym() == FcitxKey_Return) {
           state->set_consumed(true);
           state->set_commit("司会");
+          state->set_selected_candidate(0);
+          state->add_candidates()->set_text("は");
+        } else if (expected == ExpectedRequest::Forget) {
+          state->set_consumed(true);
+          state->set_preedit("かな");
+          state->set_preedit_cursor(2);
+          state->set_selected_candidate(0);
+          auto *candidate = state->add_candidates();
+          candidate->set_text("司会");
+          candidate->mutable_composing_count()->set_input(1);
+        } else if (expected == ExpectedRequest::SelectTypo) {
+          state->set_consumed(true);
+          state->set_commit("仮名");
           state->set_reset(true);
         } else if (expected != ExpectedRequest::Key) {
           state->set_consumed(true);
         }
-      }
-      if (expected == ExpectedRequest::Key) {
-        ++keyIndex;
       }
 
       std::string payload;
@@ -263,17 +253,13 @@ int main() {
 
     serverValid = exchange(ExpectedRequest::Start) && serverValid;
     serverValid = exchange(ExpectedRequest::Key) && serverValid;
-    if constexpr (CanForgetCandidate<fcitx::BeankeyState>) {
-      serverValid = exchange(ExpectedRequest::Forget) && serverValid;
-    }
+    serverValid = exchange(ExpectedRequest::Forget) && serverValid;
+    serverValid = exchange(ExpectedRequest::Typo) && serverValid;
+    serverValid = exchange(ExpectedRequest::SelectTypo) && serverValid;
     serverValid = exchange(ExpectedRequest::Key) && serverValid;
     serverValid = exchange(ExpectedRequest::Key) && serverValid;
-    if constexpr (CanResetLearning<fcitx::BeankeyState>) {
-      serverValid = exchange(ExpectedRequest::ResetLearning) && serverValid;
-    }
-    if constexpr (CanRequestTypoCorrections<fcitx::BeankeyState>) {
-      serverValid = exchange(ExpectedRequest::Typo) && serverValid;
-    }
+    serverValid = exchange(ExpectedRequest::Key) && serverValid;
+    serverValid = exchange(ExpectedRequest::ResetLearning) && serverValid;
     close(connection);
     close(listener);
   });
@@ -291,6 +277,20 @@ int main() {
     TestInputContext inputContext(instance.inputContextManager());
     inputContext.setCapabilityFlags(fcitx::CapabilityFlag::Preedit);
     fcitx::InputMethodEntry entry("beankey", "beankey", "ja", "beankey");
+
+    fcitx::FocusInEvent activateEvent(&inputContext);
+    engine.activate(entry, activateEvent);
+    const auto statusActions =
+        inputContext.statusArea().actions(fcitx::StatusGroup::InputMethod);
+    valid = report(statusActions.size() == 1,
+                   "learning reset is not exposed in the Fcitx status area") &&
+            valid;
+    if (!statusActions.empty()) {
+      valid = report(statusActions.front()->shortText(&inputContext) ==
+                         "Reset learning",
+                     "Fcitx learning reset action has the wrong label") &&
+              valid;
+    }
 
     fcitx::KeyEvent printable(&inputContext, fcitx::Key(FcitxKey_a));
     engine.keyEvent(entry, printable);
@@ -314,60 +314,87 @@ int main() {
         actionable->hasAction(candidates->candidate(0));
     valid = report(hasForgetAction, "candidate has no Fcitx forget action") &&
             valid;
-    auto *state = engine.state(&inputContext);
-    const bool canForget = CanForgetCandidate<fcitx::BeankeyState>;
-    valid =
-        report(canForget, "addon has no ForgetCandidate request entry point") &&
-        valid;
-    if (canForget) {
-      if (hasForgetAction) {
-        const auto actions =
-            actionable->candidateActions(candidates->candidate(0));
-        valid = report(!actions.empty(), "candidate forget action is empty") &&
-                valid;
-        if (!actions.empty()) {
-          actionable->triggerAction(candidates->candidate(0),
-                                    actions.front().id());
-        }
-      } else {
-        valid = report(forgetCandidate(*state),
-                       "addon did not send ForgetCandidate") &&
-                valid;
-      }
+    const auto candidateActions =
+        hasForgetAction ? actionable->candidateActions(candidates->candidate(0))
+                        : std::vector<fcitx::CandidateAction>{};
+    const auto forgetAction = std::find_if(
+        candidateActions.begin(), candidateActions.end(),
+        [](const auto &action) { return action.text() == "Forget"; });
+    const auto typoAction = std::find_if(
+        candidateActions.begin(), candidateActions.end(),
+        [](const auto &action) { return action.text() == "Correct typos"; });
+    valid = report(forgetAction != candidateActions.end(),
+                   "candidate forget action is missing") &&
+            valid;
+    valid = report(typoAction != candidateActions.end(),
+                   "enabled LM typo correction has no candidate action") &&
+            valid;
+    if (forgetAction != candidateActions.end()) {
+      actionable->triggerAction(candidates->candidate(0), forgetAction->id());
+    }
+    if (typoAction != candidateActions.end()) {
+      actionable->triggerAction(candidates->candidate(0), typoAction->id());
     }
 
+    const auto typoCandidates = inputContext.inputPanel().candidateList();
+    valid =
+        report(typoCandidates && typoCandidates->size() == 1,
+               "LM typo corrections did not reach the Fcitx candidate UI") &&
+        valid;
+    if (typoCandidates && typoCandidates->size() == 1) {
+      valid = report(typoCandidates->candidate(0).text().toString() == "仮名",
+                     "LM typo correction displayed the wrong conversion") &&
+              valid;
+      valid =
+          report(typoCandidates->candidate(0).comment().toString() == "かな",
+                 "LM typo correction omitted the corrected input") &&
+          valid;
+    }
+    fcitx::KeyEvent selectTypo(&inputContext, fcitx::Key(FcitxKey_1));
+    engine.keyEvent(entry, selectTypo);
+    valid = report(selectTypo.accepted(),
+                   "selected LM typo correction was not accepted") &&
+            valid;
+    valid = report(inputContext.committed() == "仮名",
+                   "selected LM typo correction was not committed") &&
+            valid;
+
+    fcitx::KeyEvent printableAgain(&inputContext, fcitx::Key(FcitxKey_a));
+    engine.keyEvent(entry, printableAgain);
+    valid = report(printableAgain.accepted(),
+                   "second consumed printable key was not accepted") &&
+            valid;
     fcitx::KeyEvent enter(&inputContext, fcitx::Key(FcitxKey_Return));
     engine.keyEvent(entry, enter);
     valid =
         report(enter.accepted(), "consumed Enter was not accepted") && valid;
-    valid = report(inputContext.committed() == "司会",
+    valid = report(inputContext.committed() == "仮名司会",
                    "daemon commit did not reach Fcitx") &&
             valid;
     valid = report(inputContext.inputPanel().clientPreedit().empty(),
                    "committed preedit was not cleared") &&
             valid;
+    const auto postCandidates = inputContext.inputPanel().candidateList();
+    valid = report(postCandidates && postCandidates->size() == 1,
+                   "post-composition candidate did not reach Fcitx") &&
+            valid;
+    auto *postActionable =
+        postCandidates ? postCandidates->toActionable() : nullptr;
+    valid = report(postActionable != nullptr,
+                   "post-composition candidate list is not actionable") &&
+            valid;
+    if (postActionable != nullptr) {
+      valid = report(!postActionable->hasAction(postCandidates->candidate(0)),
+                     "post-composition candidate exposes invalid actions") &&
+              valid;
+    }
 
     fcitx::KeyEvent tab(&inputContext, fcitx::Key(FcitxKey_Tab));
     engine.keyEvent(entry, tab);
     valid = report(!tab.accepted(), "unconsumed Tab was accepted") && valid;
 
-    const bool canResetLearning = CanResetLearning<fcitx::BeankeyState>;
-    valid = report(canResetLearning,
-                   "addon has no ResetLearning request entry point") &&
-            valid;
-    if (canResetLearning) {
-      valid =
-          report(resetLearning(*state), "addon did not send ResetLearning") &&
-          valid;
-    }
-    const bool canRequestTypo = CanRequestTypoCorrections<fcitx::BeankeyState>;
-    valid = report(canRequestTypo,
-                   "addon has no RequestTypoCorrections entry point") &&
-            valid;
-    if (canRequestTypo) {
-      valid = report(requestTypoCorrections(*state),
-                     "addon did not send RequestTypoCorrections") &&
-              valid;
+    if (!statusActions.empty()) {
+      statusActions.front()->activate(&inputContext);
     }
   }
 

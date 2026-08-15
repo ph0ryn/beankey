@@ -30,6 +30,7 @@ use crate::{LlamaModel, PROTOCOL_VERSION, protocol};
 
 const KEY_BACKSPACE: u32 = 0xff08;
 const KEY_RETURN: u32 = 0xff0d;
+const KEY_KP_ENTER: u32 = 0xff8d;
 const KEY_ESCAPE: u32 = 0xff1b;
 const KEY_LEFT: u32 = 0xff51;
 const KEY_UP: u32 = 0xff52;
@@ -49,6 +50,10 @@ struct SessionState {
     last_committed: Option<beankey_converter::Candidate>,
     post_predictions: Vec<PostCompositionPrediction>,
     live_candidate: Option<beankey_converter::Candidate>,
+    typo_corrections: Vec<beankey_converter::LmTypoCandidate>,
+    lm_typo_available: bool,
+    learning_available: bool,
+    learning_writable: bool,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -75,6 +80,8 @@ pub struct Engine {
     lm_typo_ngram: Option<NGramLanguageModel>,
     foreign_completion_provider: Option<Arc<dyn ForeignCompletionProvider>>,
     learning_memory: Option<LearningMemory>,
+    learning_available: bool,
+    learning_writable: bool,
     text_replacer: Option<TextReplacer>,
     user_dictionary: Vec<DictionaryEntry>,
     user_dictionary_directory: Option<PathBuf>,
@@ -230,6 +237,8 @@ impl Engine {
             lm_typo_ngram: None,
             foreign_completion_provider: None,
             learning_memory: None,
+            learning_available: false,
+            learning_writable: false,
             text_replacer: None,
             user_dictionary: Vec::new(),
             user_dictionary_directory: None,
@@ -348,6 +357,8 @@ impl Engine {
             mode,
             config.max_count,
         )?);
+        self.learning_available = config.mode != LearningModeConfig::Nothing;
+        self.learning_writable = config.mode == LearningModeConfig::InputAndOutput;
         Ok(())
     }
 
@@ -628,6 +639,10 @@ impl Engine {
                         last_committed: None,
                         post_predictions: Vec::new(),
                         live_candidate: None,
+                        typo_corrections: Vec::new(),
+                        lm_typo_available: self.lm_typo_enabled,
+                        learning_available: self.learning_available,
+                        learning_writable: self.learning_writable,
                     },
                 );
                 state_envelope(
@@ -635,6 +650,9 @@ impl Engine {
                     session_id,
                     protocol::StateResponse {
                         reset: true,
+                        lm_typo_available: self.lm_typo_enabled,
+                        learning_available: self.learning_available,
+                        learning_writable: self.learning_writable,
                         ..Default::default()
                     },
                 )
@@ -685,6 +703,9 @@ impl Engine {
                 session_id,
                 protocol::StateResponse {
                     reset: true,
+                    lm_typo_available: session.lm_typo_available,
+                    learning_available: session.learning_available,
+                    learning_writable: session.learning_writable,
                     ..Default::default()
                 },
             );
@@ -693,6 +714,7 @@ impl Engine {
             let result = self.request_typo_corrections(&session);
             match result {
                 Ok(candidates) => {
+                    session.typo_corrections.clone_from(&candidates);
                     self.sessions.insert(session_id.clone(), session);
                     return typo_correction_envelope(request_id, session_id, candidates);
                 }
@@ -702,6 +724,7 @@ impl Engine {
                     session.last_committed = None;
                     session.post_predictions.clear();
                     session.live_candidate = None;
+                    session.typo_corrections.clear();
                     self.sessions.insert(session_id.clone(), session);
                     return error_envelope(request_id, session_id, code, message);
                 }
@@ -715,8 +738,12 @@ impl Engine {
                 session.last_committed = None;
                 session.post_predictions.clear();
                 session.live_candidate = None;
+                session.typo_corrections.clear();
                 Ok(protocol::StateResponse {
                     reset: true,
+                    lm_typo_available: session.lm_typo_available,
+                    learning_available: session.learning_available,
+                    learning_writable: session.learning_writable,
                     ..Default::default()
                 })
             }
@@ -737,6 +764,9 @@ impl Engine {
             }
             Payload::SelectCandidate(selection) => {
                 self.select_candidate(&mut session, selection.index as usize)
+            }
+            Payload::SelectTypoCorrection(selection) => {
+                self.select_typo_correction(&mut session, selection.index as usize)
             }
             Payload::ForgetCandidate(forget) => {
                 self.forget_candidate(&mut session, forget.index as usize)
@@ -763,10 +793,14 @@ impl Engine {
                 session.last_committed = None;
                 session.post_predictions.clear();
                 session.live_candidate = None;
+                session.typo_corrections.clear();
                 Ok(protocol::StateResponse {
                     consumed,
                     commit,
                     reset: consumed,
+                    lm_typo_available: session.lm_typo_available,
+                    learning_available: session.learning_available,
+                    learning_writable: session.learning_writable,
                     ..Default::default()
                 })
             }
@@ -789,6 +823,7 @@ impl Engine {
                     session.last_committed = None;
                     session.post_predictions.clear();
                     session.live_candidate = None;
+                    session.typo_corrections.clear();
                 }
                 error_envelope(request_id, session_id, code, message)
             }
@@ -843,6 +878,7 @@ impl Engine {
         if event.release {
             return Ok(make_state(session, false, String::new(), false));
         }
+        session.typo_corrections.clear();
         let post_candidate_count = session.post_predictions.len();
         match event.key_sym {
             KEY_BACKSPACE if !session.conversion.composing().is_empty() => {
@@ -868,10 +904,13 @@ impl Engine {
                 return Ok(protocol::StateResponse {
                     consumed: true,
                     reset: true,
+                    lm_typo_available: session.lm_typo_available,
+                    learning_available: session.learning_available,
+                    learning_writable: session.learning_writable,
                     ..Default::default()
                 });
             }
-            KEY_RETURN if !session.conversion.composing().is_empty() => {
+            KEY_RETURN | KEY_KP_ENTER if !session.conversion.composing().is_empty() => {
                 if session.conversion.candidates().is_empty() {
                     let commit = session.conversion.composing().surface();
                     session.conversion.reset();
@@ -880,13 +919,13 @@ impl Engine {
                         consumed: true,
                         commit,
                         reset: true,
+                        lm_typo_available: session.lm_typo_available,
+                        learning_available: session.learning_available,
+                        learning_writable: session.learning_writable,
                         ..Default::default()
                     });
                 }
                 return self.select_candidate(session, session.selected_candidate);
-            }
-            KEY_RETURN if post_candidate_count > 0 => {
-                return self.select_post_prediction(session, session.selected_candidate);
             }
             KEY_SPACE if !session.conversion.composing().is_empty() => {
                 if !session.conversion.candidates().is_empty() {
@@ -914,7 +953,7 @@ impl Engine {
                 };
                 return Ok(make_state(session, true, String::new(), false));
             }
-            _ if !event.text.is_empty() => {
+            _ if valid_event_text(&event) => {
                 session.last_committed = None;
                 session.post_predictions.clear();
                 session.live_candidate = None;
@@ -965,6 +1004,7 @@ impl Engine {
         session: &mut SessionState,
         index: usize,
     ) -> SessionRequestResult<protocol::StateResponse> {
+        session.typo_corrections.clear();
         if session.conversion.composing().is_empty() && !session.post_predictions.is_empty() {
             return self.select_post_prediction(session, index);
         }
@@ -1018,6 +1058,7 @@ impl Engine {
         session: &mut SessionState,
         index: usize,
     ) -> SessionRequestResult<protocol::StateResponse> {
+        session.typo_corrections.clear();
         let prediction = session
             .post_predictions
             .get(index)
@@ -1065,6 +1106,38 @@ impl Engine {
         Ok(make_state(session, true, prediction.text, reset))
     }
 
+    fn select_typo_correction(
+        &mut self,
+        session: &mut SessionState,
+        index: usize,
+    ) -> SessionRequestResult<protocol::StateResponse> {
+        let correction = session
+            .typo_corrections
+            .get(index)
+            .cloned()
+            .ok_or_else(|| {
+                (
+                    Code::InvalidPayload,
+                    format!("typo correction index {index} is outside the current candidates"),
+                )
+            })?;
+        session.conversion.reset();
+        session.selected_candidate = 0;
+        session.last_committed = None;
+        session.post_predictions.clear();
+        session.live_candidate = None;
+        session.typo_corrections.clear();
+        Ok(protocol::StateResponse {
+            consumed: true,
+            commit: correction.converted_text,
+            reset: true,
+            lm_typo_available: session.lm_typo_available,
+            learning_available: session.learning_available,
+            learning_writable: session.learning_writable,
+            ..Default::default()
+        })
+    }
+
     fn request_post_predictions(
         &self,
         candidate: &beankey_converter::Candidate,
@@ -1089,6 +1162,7 @@ impl Engine {
         session: &mut SessionState,
         index: usize,
     ) -> SessionRequestResult<protocol::StateResponse> {
+        session.typo_corrections.clear();
         let candidate = session
             .conversion
             .candidates()
@@ -1119,6 +1193,7 @@ impl Engine {
         &mut self,
         session: &mut SessionState,
     ) -> SessionRequestResult<protocol::StateResponse> {
+        session.typo_corrections.clear();
         session.conversion.reset_learning().map_err(|error| {
             (
                 Code::Internal,
@@ -1232,6 +1307,13 @@ impl Engine {
         session.live_candidate = live_candidate;
         Ok(())
     }
+}
+
+fn valid_event_text(event: &protocol::KeyEvent) -> bool {
+    !event.text.is_empty()
+        && !event.text.chars().any(char::is_control)
+        && !event.input.chars().any(char::is_control)
+        && !event.intention.chars().any(char::is_control)
 }
 
 fn surrounding_context(
@@ -1413,6 +1495,9 @@ fn make_state(
         selected_candidate: session.selected_candidate as i32,
         commit,
         reset,
+        lm_typo_available: session.lm_typo_available,
+        learning_available: session.learning_available,
+        learning_writable: session.learning_writable,
     }
 }
 
@@ -1540,6 +1625,42 @@ mod tests {
                 Vec::new()
             }
         }
+    }
+
+    #[test]
+    fn distinguishes_read_only_learning_management_from_candidate_forgetting() {
+        let dictionary = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("data/azooKey_dictionary_storage/Dictionary");
+        let state = tempfile::tempdir().unwrap();
+        let mut engine = Engine::open(dictionary).unwrap();
+        engine
+            .load_learning(
+                state.path(),
+                &LearningConfig {
+                    mode: LearningModeConfig::OnlyOutput,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let response = engine.handle(protocol::Envelope {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: 1,
+            session_id: "read-only-learning".into(),
+            payload: Some(Payload::StartSession(protocol::StartSession {
+                input_style: protocol::InputStyle::RomanToKana as i32,
+                surrounding_text: None,
+                keyboard_language: protocol::KeyboardLanguage::Japanese as i32,
+                custom_input_table: String::new(),
+            })),
+            trace: Vec::new(),
+        });
+        let Some(Payload::StateResponse(response)) = response.payload else {
+            panic!("session start did not return state");
+        };
+        assert!(response.learning_available);
+        assert!(!response.learning_writable);
     }
 
     #[test]
@@ -1757,17 +1878,42 @@ mod tests {
             panic!("LM typo correction did not return its dedicated response");
         };
         assert_eq!(correction.candidates[0].corrected_input, "kana");
+        let expected_commit = correction.candidates[0].converted_text.clone();
 
-        let state = engine.handle(envelope(
+        let invalid = engine.handle(envelope(
             4,
+            Payload::SelectTypoCorrection(protocol::SelectTypoCorrection {
+                index: correction.candidates.len() as u32,
+            }),
+        ));
+        assert!(matches!(invalid.payload, Some(Payload::ProtocolError(_))));
+        let stale = engine.handle(envelope(
+            5,
+            Payload::SelectTypoCorrection(protocol::SelectTypoCorrection { index: 0 }),
+        ));
+        assert!(matches!(stale.payload, Some(Payload::ProtocolError(_))));
+
+        engine.handle(envelope(
+            6,
             Payload::KeyEvent(protocol::KeyEvent {
-                key_sym: KEY_LEFT,
+                text: "kana".into(),
                 ..Default::default()
             }),
         ));
-        let Payload::StateResponse(state) = state.payload.unwrap() else {
-            panic!("composition did not remain active");
+        engine.handle(envelope(
+            7,
+            Payload::RequestTypoCorrections(protocol::RequestTypoCorrections {}),
+        ));
+        let selected = engine.handle(envelope(
+            8,
+            Payload::SelectTypoCorrection(protocol::SelectTypoCorrection { index: 0 }),
+        ));
+        let Payload::StateResponse(selected) = selected.payload.unwrap() else {
+            panic!("LM typo correction selection did not return state");
         };
-        assert_eq!(state.preedit, "かな");
+        assert_eq!(selected.commit, expected_commit);
+        assert!(selected.consumed);
+        assert!(selected.reset);
+        assert!(selected.preedit.is_empty());
     }
 }

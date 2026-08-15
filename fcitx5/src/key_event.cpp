@@ -13,6 +13,14 @@ namespace {
 
 constexpr std::uint32_t kShiftModifier = 1;
 
+std::string printableKeyText(fcitx::KeySym symbol) {
+  const std::uint32_t codePoint = fcitx::Key::keySymToUnicode(symbol);
+  if (codePoint < 0x20 || (codePoint >= 0x7f && codePoint <= 0x9f)) {
+    return {};
+  }
+  return fcitx::Key::keySymToUTF8(symbol);
+}
+
 } // namespace
 
 void populateKeyEvent(const fcitx::KeyEvent &source, v1::KeyEvent *target) {
@@ -25,9 +33,9 @@ void populateKeyEvent(const fcitx::KeyEvent &source, v1::KeyEvent *target) {
       {fcitx::KeyState::Ctrl, fcitx::KeyState::Alt, fcitx::KeyState::Super,
        fcitx::KeyState::Super2, fcitx::KeyState::Hyper, fcitx::KeyState::Meta});
   if (!source.key().states().testAny(shortcutModifiers)) {
-    target->set_text(fcitx::Key::keySymToUTF8(source.key().sym()));
+    target->set_text(printableKeyText(source.key().sym()));
   }
-  const std::string rawText = fcitx::Key::keySymToUTF8(source.rawKey().sym());
+  const std::string rawText = printableKeyText(source.rawKey().sym());
   target->set_input(target->text().empty() ? rawText : target->text());
   target->set_intention(rawText);
 }
