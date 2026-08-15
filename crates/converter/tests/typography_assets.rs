@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use beankey_converter::{
+use bean_key_converter::{
     ConversionSession, DictionaryStore, InputStyle, InputTableRegistry, NormalConverter,
     RequestOptions,
 };
@@ -17,7 +17,7 @@ fn exposes_typography_only_when_the_optional_provider_is_enabled() {
     let converter = NormalConverter::new(&dictionary);
     let tables = InputTableRegistry::new();
     let mut session = ConversionSession::new();
-    session.insert_str("BeanKey", InputStyle::Direct, &tables);
+    session.insert_str("beanKey", InputStyle::Direct, &tables);
 
     let defaults = session
         .request(&converter, &tables, RequestOptions::default())
@@ -40,8 +40,8 @@ fn exposes_typography_only_when_the_optional_provider_is_enabled() {
         )
         .unwrap();
     assert!(enabled.main_results.iter().any(|candidate| {
-        candidate.text == "𝐁𝐞𝐚𝐧𝐊𝐞𝐲"
+        candidate.text == "𝐛𝐞𝐚𝐧𝐊𝐞𝐲"
             && candidate.value == -15.0
-            && candidate.entries[0].ruby == "BeanKey"
+            && candidate.entries[0].ruby == "beanKey"
     }));
 }

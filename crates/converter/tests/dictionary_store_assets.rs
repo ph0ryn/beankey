@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use beankey_converter::DictionaryStore;
+use bean_key_converter::DictionaryStore;
 
 fn dictionary_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

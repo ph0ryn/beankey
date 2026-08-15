@@ -81,7 +81,7 @@ void writeFrame(int socket, const std::string &payload) {
 
 int main() {
   std::array<char, 64> directoryTemplate{};
-  std::strcpy(directoryTemplate.data(), "/tmp/beankey-client-test.XXXXXX");
+  std::strcpy(directoryTemplate.data(), "/tmp/bean-key-client-test.XXXXXX");
   const char *directory = mkdtemp(directoryTemplate.data());
   assert(directory != nullptr);
   const std::string socketPath = std::string(directory) + "/daemon.sock";
@@ -98,9 +98,9 @@ int main() {
   std::thread server([listener] {
     const int connection = accept4(listener, nullptr, nullptr, SOCK_CLOEXEC);
     assert(connection >= 0);
-    beankey::v1::Envelope request;
+    bean_key::v1::Envelope request;
     assert(request.ParseFromString(readFrame(connection)));
-    beankey::v1::Envelope response;
+    bean_key::v1::Envelope response;
     response.set_protocol_version(request.protocol_version());
     response.set_request_id(request.request_id());
     response.set_session_id(request.session_id());
@@ -114,12 +114,12 @@ int main() {
     close(listener);
   });
 
-  beankey::Client client(socketPath);
+  bean_key::Client client(socketPath);
   bool launched = false;
   assert(client.ensureConnected([&launched] { launched = true; },
                                 std::chrono::milliseconds(500)));
   assert(!launched);
-  beankey::v1::Envelope request;
+  bean_key::v1::Envelope request;
   request.set_protocol_version(1);
   request.set_request_id(7);
   request.set_session_id("client-test");
@@ -145,11 +145,11 @@ int main() {
     assert(connection >= 0);
     assert(!readFrame(connection).empty());
     writeLength(connection, static_cast<std::uint32_t>(
-                                beankey::Client::kMaximumMessageSize + 1));
+                                bean_key::Client::kMaximumMessageSize + 1));
     close(connection);
     close(oversizedListener);
   });
-  beankey::Client oversized(socketPath);
+  bean_key::Client oversized(socketPath);
   assert(oversized.ensureConnected([] {}, std::chrono::milliseconds(500)));
   assert(!oversized.request(request, std::chrono::milliseconds(500)));
   assert(!oversized.connected());
@@ -170,7 +170,7 @@ int main() {
     close(connection);
     close(malformedListener);
   });
-  beankey::Client malformed(socketPath);
+  bean_key::Client malformed(socketPath);
   assert(malformed.ensureConnected([] {}, std::chrono::milliseconds(500)));
   assert(!malformed.request(request, std::chrono::milliseconds(500)));
   assert(!malformed.connected());
@@ -180,7 +180,7 @@ int main() {
   assert(rmdir(directory) == 0);
 
   bool missingLaunch = false;
-  beankey::Client missing(socketPath);
+  bean_key::Client missing(socketPath);
   assert(!missing.ensureConnected([&missingLaunch] { missingLaunch = true; },
                                   std::chrono::milliseconds(50)));
   assert(missingLaunch);

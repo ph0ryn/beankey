@@ -451,8 +451,8 @@ mod tests {
                 .any(|candidate| candidate.text == "1,234")
         );
         assert_eq!(
-            special_candidates(&composing("ばーじょん"), Some("beankey 0.1"))[0].text,
-            "beankey 0.1"
+            special_candidates(&composing("ばーじょん"), Some("beanKey 0.1"))[0].text,
+            "beanKey 0.1"
         );
     }
 

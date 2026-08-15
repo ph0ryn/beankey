@@ -41,7 +41,7 @@ std::string socketPath() {
   if (runtimeDirectory == nullptr || runtimeDirectory[0] != '/') {
     return {};
   }
-  return std::string(runtimeDirectory) + "/beankey/daemon.sock";
+  return std::string(runtimeDirectory) + "/bean-key/daemon.sock";
 }
 
 std::size_t characterCount(const std::string &text) {
@@ -63,11 +63,11 @@ std::unique_ptr<CommonCandidateList> makeCandidateList() {
   return candidates;
 }
 
-class BeankeyCandidateWord final : public CandidateWord {
+class BeanKeyCandidateWord final : public CandidateWord {
 public:
-  BeankeyCandidateWord(std::uint32_t index, std::string text,
+  BeanKeyCandidateWord(std::uint32_t index, std::string text,
                        std::string annotation, bool regularCandidate,
-                       BeankeyState *state)
+                       BeanKeyState *state)
       : CandidateWord(Text(std::move(text))), index_(index),
         regularCandidate_(regularCandidate), state_(state) {
     if (!annotation.empty()) {
@@ -87,13 +87,13 @@ public:
 private:
   std::uint32_t index_;
   bool regularCandidate_;
-  BeankeyState *state_;
+  BeanKeyState *state_;
 };
 
-class BeankeyTypoCorrectionWord final : public CandidateWord {
+class BeanKeyTypoCorrectionWord final : public CandidateWord {
 public:
-  BeankeyTypoCorrectionWord(std::uint32_t index, std::string correctedInput,
-                            std::string convertedText, BeankeyState *state)
+  BeanKeyTypoCorrectionWord(std::uint32_t index, std::string correctedInput,
+                            std::string convertedText, BeanKeyState *state)
       : CandidateWord(Text(std::move(convertedText))), index_(index),
         state_(state) {
     setComment(Text(std::move(correctedInput)));
@@ -107,17 +107,17 @@ public:
 
 private:
   std::uint32_t index_;
-  BeankeyState *state_;
+  BeanKeyState *state_;
 };
 
-class BeankeyCandidateActions final : public ActionableCandidateList {
+class BeanKeyCandidateActions final : public ActionableCandidateList {
 public:
-  BeankeyCandidateActions(bool learningWritable, bool lmTypoAvailable)
+  BeanKeyCandidateActions(bool learningWritable, bool lmTypoAvailable)
       : learningWritable_(learningWritable), lmTypoAvailable_(lmTypoAvailable) {
   }
 
   bool hasAction(const CandidateWord &candidate) const override {
-    const auto *word = dynamic_cast<const BeankeyCandidateWord *>(&candidate);
+    const auto *word = dynamic_cast<const BeanKeyCandidateWord *>(&candidate);
     return word != nullptr && word->regularCandidate() &&
            (learningWritable_ || lmTypoAvailable_);
   }
@@ -146,7 +146,7 @@ public:
   }
 
   void triggerAction(const CandidateWord &candidate, int id) override {
-    const auto *word = dynamic_cast<const BeankeyCandidateWord *>(&candidate);
+    const auto *word = dynamic_cast<const BeanKeyCandidateWord *>(&candidate);
     if (word != nullptr && word->regularCandidate() && id == kForgetAction &&
         learningWritable_) {
       word->forget();
@@ -165,14 +165,14 @@ private:
 
 } // namespace
 
-BeankeyState::BeankeyState(InputContext *inputContext, BeankeyEngine *engine)
+BeanKeyState::BeanKeyState(InputContext *inputContext, BeanKeyEngine *engine)
     : inputContext_(inputContext), engine_(engine) {}
 
-BeankeyState::~BeankeyState() = default;
+BeanKeyState::~BeanKeyState() = default;
 
-bool BeankeyState::focusIn() { return start(); }
+bool BeanKeyState::focusIn() { return start(); }
 
-void BeankeyState::focusOut(bool commitComposition) {
+void BeanKeyState::focusOut(bool commitComposition) {
   if (commitComposition && started_) {
     static_cast<void>(this->commitComposition());
   }
@@ -187,7 +187,7 @@ void BeankeyState::focusOut(bool commitComposition) {
   clearUi();
 }
 
-bool BeankeyState::processKey(KeyEvent &event) {
+bool BeanKeyState::processKey(KeyEvent &event) {
   if (event.isRelease()) {
     return false;
   }
@@ -201,12 +201,12 @@ bool BeankeyState::processKey(KeyEvent &event) {
   if (candidateList && selection >= 0 && selection < candidateList->size()) {
     const auto &candidate = candidateList->candidate(selection);
     if (const auto *word =
-            dynamic_cast<const BeankeyTypoCorrectionWord *>(&candidate)) {
+            dynamic_cast<const BeanKeyTypoCorrectionWord *>(&candidate)) {
       return selectTypoCorrection(word->index());
     }
     if (selectedCandidate_ >= 0) {
       if (const auto *word =
-              dynamic_cast<const BeankeyCandidateWord *>(&candidate)) {
+              dynamic_cast<const BeanKeyCandidateWord *>(&candidate)) {
         return selectCandidate(word->index());
       }
     }
@@ -214,13 +214,13 @@ bool BeankeyState::processKey(KeyEvent &event) {
 
   auto request = envelope();
   auto *key = request.mutable_key_event();
-  beankey::populateKeyEvent(event, key);
-  if (key->action() == beankey::v1::USER_ACTION_UNSPECIFIED) {
+  bean_key::populateKeyEvent(event, key);
+  if (key->action() == bean_key::v1::USER_ACTION_UNSPECIFIED) {
     return false;
   }
   fillSurroundingText(key->mutable_surrounding_text());
 
-  std::vector<beankey::v1::CursorAction> actions;
+  std::vector<bean_key::v1::CursorAction> actions;
   if (selectedCandidate_ >= 0 &&
       static_cast<std::size_t>(selectedCandidate_) < candidateActions_.size()) {
     actions = candidateActions_[selectedCandidate_];
@@ -228,7 +228,7 @@ bool BeankeyState::processKey(KeyEvent &event) {
   return send(std::move(request), actions);
 }
 
-bool BeankeyState::selectCandidate(std::uint32_t index) {
+bool BeanKeyState::selectCandidate(std::uint32_t index) {
   if (!start() || index >= candidateActions_.size()) {
     failSession();
     return false;
@@ -238,7 +238,7 @@ bool BeankeyState::selectCandidate(std::uint32_t index) {
   return send(std::move(request), candidateActions_[index]);
 }
 
-bool BeankeyState::forgetCandidate(std::uint32_t index) {
+bool BeanKeyState::forgetCandidate(std::uint32_t index) {
   if (!start() || index >= candidateActions_.size()) {
     failSession();
     return false;
@@ -248,7 +248,7 @@ bool BeankeyState::forgetCandidate(std::uint32_t index) {
   return send(std::move(request));
 }
 
-bool BeankeyState::selectTypoCorrection(std::uint32_t index) {
+bool BeanKeyState::selectTypoCorrection(std::uint32_t index) {
   if (!start()) {
     failSession();
     return false;
@@ -258,7 +258,7 @@ bool BeankeyState::selectTypoCorrection(std::uint32_t index) {
   return send(std::move(request));
 }
 
-bool BeankeyState::resetLearning() {
+bool BeanKeyState::resetLearning() {
   if (!start()) {
     failSession();
     return false;
@@ -268,7 +268,7 @@ bool BeankeyState::resetLearning() {
   return send(std::move(request));
 }
 
-bool BeankeyState::requestTypoCorrections() {
+bool BeanKeyState::requestTypoCorrections() {
   if (!start()) {
     failSession();
     return false;
@@ -288,11 +288,11 @@ bool BeankeyState::requestTypoCorrections() {
   return true;
 }
 
-bool BeankeyState::learningAvailable() const { return learningAvailable_; }
+bool BeanKeyState::learningAvailable() const { return learningAvailable_; }
 
-bool BeankeyState::learningWritable() const { return learningWritable_; }
+bool BeanKeyState::learningWritable() const { return learningWritable_; }
 
-void BeankeyState::reset() {
+void BeanKeyState::reset() {
   if (!started_ || !engine_->client().connected()) {
     clearUi();
     started_ = false;
@@ -305,7 +305,7 @@ void BeankeyState::reset() {
   }
 }
 
-bool BeankeyState::start() {
+bool BeanKeyState::start() {
   if (started_) {
     return true;
   }
@@ -316,8 +316,8 @@ bool BeankeyState::start() {
   nextRequestId_ = 1;
   auto request = envelope();
   auto *start = request.mutable_start_session();
-  start->set_input_style(beankey::v1::INPUT_STYLE_UNSPECIFIED);
-  start->set_keyboard_language(beankey::v1::KEYBOARD_LANGUAGE_UNSPECIFIED);
+  start->set_input_style(bean_key::v1::INPUT_STYLE_UNSPECIFIED);
+  start->set_keyboard_language(bean_key::v1::KEYBOARD_LANGUAGE_UNSPECIFIED);
   fillSurroundingText(start->mutable_surrounding_text());
   const auto response =
       engine_->client().request(request, engine_->requestTimeout());
@@ -332,8 +332,8 @@ bool BeankeyState::start() {
   return apply(*response, {});
 }
 
-bool BeankeyState::pageCandidates(
-    beankey::v1::PageCandidates::Direction direction) {
+bool BeanKeyState::pageCandidates(
+    bean_key::v1::PageCandidates::Direction direction) {
   if (candidateActions_.empty()) {
     return false;
   }
@@ -344,15 +344,15 @@ bool BeankeyState::pageCandidates(
   return send(std::move(request));
 }
 
-bool BeankeyState::commitComposition() {
+bool BeanKeyState::commitComposition() {
   auto request = envelope();
   request.mutable_commit_composition();
   return send(std::move(request));
 }
 
-bool BeankeyState::send(
-    beankey::v1::Envelope request,
-    const std::vector<beankey::v1::CursorAction> &commitActions) {
+bool BeanKeyState::send(
+    bean_key::v1::Envelope request,
+    const std::vector<bean_key::v1::CursorAction> &commitActions) {
   const auto response =
       engine_->client().request(request, engine_->requestTimeout());
   if (!response || response->protocol_version() != kProtocolVersion ||
@@ -364,9 +364,9 @@ bool BeankeyState::send(
   return apply(*response, commitActions);
 }
 
-bool BeankeyState::apply(
-    const beankey::v1::Envelope &response,
-    const std::vector<beankey::v1::CursorAction> &commitActions) {
+bool BeanKeyState::apply(
+    const bean_key::v1::Envelope &response,
+    const std::vector<bean_key::v1::CursorAction> &commitActions) {
   const auto &state = response.state_response();
   lmTypoAvailable_ = state.lm_typo_available();
   learningAvailable_ = state.learning_available();
@@ -390,13 +390,13 @@ bool BeankeyState::apply(
   candidateActions_.clear();
   auto candidates = makeCandidateList();
   const bool selecting =
-      state.candidate_window() == beankey::v1::CANDIDATE_WINDOW_SELECTING;
+      state.candidate_window() == bean_key::v1::CANDIDATE_WINDOW_SELECTING;
   if (selecting) {
     candidates->setSelectionKey(Key::keyListFromString("1 2 3 4 5 6 7 8 9"));
   } else {
     candidateWindowStart_ = 0;
   }
-  candidates->setActionableImpl(std::make_unique<BeankeyCandidateActions>(
+  candidates->setActionableImpl(std::make_unique<BeanKeyCandidateActions>(
       learningWritable_, lmTypoAvailable_));
   selectedCandidate_ = state.selected_candidate();
   if (selecting && selectedCandidate_ >= 0) {
@@ -413,7 +413,7 @@ bool BeankeyState::apply(
       candidateWindowStart_ + static_cast<int>(kCandidatePageSize);
   for (int index = 0; index < state.candidates_size(); ++index) {
     const auto &candidate = state.candidates(index);
-    std::vector<beankey::v1::CursorAction> actions;
+    std::vector<bean_key::v1::CursorAction> actions;
     actions.reserve(candidate.actions_size());
     for (const auto &action : candidate.actions()) {
       actions.push_back(action);
@@ -426,7 +426,7 @@ bool BeankeyState::apply(
     if ((selecting && index >= candidateWindowStart_ &&
          index < candidateWindowEnd) ||
         (!selecting && index == 0)) {
-      candidates->append<BeankeyCandidateWord>(
+      candidates->append<BeanKeyCandidateWord>(
           candidate.index(), candidate.text(), candidate.annotation(),
           candidate.has_composing_count(), this);
     }
@@ -457,7 +457,7 @@ bool BeankeyState::apply(
     panel.setPreedit(preedit);
     panel.setClientPreedit(preedit);
   }
-  if (state.candidate_window() == beankey::v1::CANDIDATE_WINDOW_HIDDEN ||
+  if (state.candidate_window() == bean_key::v1::CANDIDATE_WINDOW_HIDDEN ||
       candidates->size() == 0) {
     panel.setCandidateList(nullptr);
   } else {
@@ -477,8 +477,8 @@ bool BeankeyState::apply(
   return state.consumed();
 }
 
-void BeankeyState::showTypoCorrections(
-    const beankey::v1::TypoCorrectionResponse &response) {
+void BeanKeyState::showTypoCorrections(
+    const bean_key::v1::TypoCorrectionResponse &response) {
   if (response.candidates().empty()) {
     return;
   }
@@ -488,7 +488,7 @@ void BeankeyState::showTypoCorrections(
   candidates->setSelectionKey(Key::keyListFromString("1 2 3 4 5 6 7 8 9"));
   for (int index = 0; index < response.candidates_size(); ++index) {
     const auto &candidate = response.candidates(index);
-    candidates->append<BeankeyTypoCorrectionWord>(
+    candidates->append<BeanKeyTypoCorrectionWord>(
         static_cast<std::uint32_t>(index), candidate.corrected_input(),
         candidate.converted_text(), this);
   }
@@ -497,8 +497,8 @@ void BeankeyState::showTypoCorrections(
   inputContext_->updateUserInterface(UserInterfaceComponent::InputPanel);
 }
 
-void BeankeyState::fillSurroundingText(
-    beankey::v1::SurroundingText *surrounding) const {
+void BeanKeyState::fillSurroundingText(
+    bean_key::v1::SurroundingText *surrounding) const {
   const auto &source = inputContext_->surroundingText();
   surrounding->set_available(source.isValid());
   if (source.isValid()) {
@@ -508,7 +508,7 @@ void BeankeyState::fillSurroundingText(
   }
 }
 
-void BeankeyState::clearUi() {
+void BeanKeyState::clearUi() {
   candidateActions_.clear();
   selectedCandidate_ = -1;
   candidateWindowStart_ = 0;
@@ -520,80 +520,80 @@ void BeankeyState::clearUi() {
   inputContext_->updateUserInterface(UserInterfaceComponent::InputPanel);
 }
 
-void BeankeyState::failSession() {
+void BeanKeyState::failSession() {
   engine_->client().disconnect();
   started_ = false;
   sessionId_.clear();
   clearUi();
 }
 
-beankey::v1::Envelope BeankeyState::envelope() {
-  beankey::v1::Envelope request;
+bean_key::v1::Envelope BeanKeyState::envelope() {
+  bean_key::v1::Envelope request;
   request.set_protocol_version(kProtocolVersion);
   request.set_request_id(nextRequestId_++);
   request.set_session_id(sessionId_);
   return request;
 }
 
-BeankeyEngine::BeankeyEngine(Instance *instance)
+BeanKeyEngine::BeanKeyEngine(Instance *instance)
     : instance_(instance), client_(socketPath()),
       factory_([this](InputContext &inputContext) {
-        return new BeankeyState(&inputContext, this);
+        return new BeanKeyState(&inputContext, this);
       }) {
-  instance_->inputContextManager().registerProperty("beankeyState", &factory_);
+  instance_->inputContextManager().registerProperty("beanKeyState", &factory_);
   resetLearningAction_.setIcon("edit-clear-history");
   resetLearningAction_.setShortText("Reset learning");
-  resetLearningAction_.setLongText("Clear all beankey learning data");
+  resetLearningAction_.setLongText("Clear all beanKey learning data");
   resetLearningAction_.connect<SimpleAction::Activated>(
       [this](InputContext *inputContext) {
         state(inputContext)->resetLearning();
       });
-  resetLearningAction_.registerAction("beankey-reset-learning",
+  resetLearningAction_.registerAction("bean-key-reset-learning",
                                       &instance_->userInterfaceManager());
 }
 
-void BeankeyEngine::activate(const InputMethodEntry &,
+void BeanKeyEngine::activate(const InputMethodEntry &,
                              InputContextEvent &event) {
-  auto *beankeyState = state(event.inputContext());
-  beankeyState->focusIn();
-  if (beankeyState->learningAvailable()) {
+  auto *beanKeyState = state(event.inputContext());
+  beanKeyState->focusIn();
+  if (beanKeyState->learningAvailable()) {
     event.inputContext()->statusArea().addAction(StatusGroup::InputMethod,
                                                  &resetLearningAction_);
   }
 }
 
-void BeankeyEngine::deactivate(const InputMethodEntry &,
+void BeanKeyEngine::deactivate(const InputMethodEntry &,
                                InputContextEvent &event) {
   state(event.inputContext())
       ->focusOut(event.type() == EventType::InputContextSwitchInputMethod);
 }
 
-void BeankeyEngine::keyEvent(const InputMethodEntry &, KeyEvent &event) {
+void BeanKeyEngine::keyEvent(const InputMethodEntry &, KeyEvent &event) {
   if (state(event.inputContext())->processKey(event)) {
     event.filterAndAccept();
   }
 }
 
-void BeankeyEngine::reset(const InputMethodEntry &, InputContextEvent &event) {
+void BeanKeyEngine::reset(const InputMethodEntry &, InputContextEvent &event) {
   state(event.inputContext())->reset();
 }
 
-BeankeyState *BeankeyEngine::state(InputContext *inputContext) {
+BeanKeyState *BeanKeyEngine::state(InputContext *inputContext) {
   return inputContext->propertyFor(&factory_);
 }
 
-beankey::Client &BeankeyEngine::client() { return client_; }
+bean_key::Client &BeanKeyEngine::client() { return client_; }
 
-bool BeankeyEngine::ensureConnected() {
+bool BeanKeyEngine::ensureConnected() {
   return client_.ensureConnected(
       [] {
-        startProcess({BEANKEY_DAEMON_PATH, "--config", BEANKEY_CONFIG_PATH});
+        startProcess({BEAN_KEY_DAEMON_PATH, "--config", BEAN_KEY_CONFIG_PATH});
       },
       kStartupTimeout);
 }
 
-std::chrono::milliseconds BeankeyEngine::requestTimeout() const {
-  return std::chrono::milliseconds(BEANKEY_REQUEST_TIMEOUT_MS);
+std::chrono::milliseconds BeanKeyEngine::requestTimeout() const {
+  return std::chrono::milliseconds(BEAN_KEY_REQUEST_TIMEOUT_MS);
 }
 
 } // namespace fcitx

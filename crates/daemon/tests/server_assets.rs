@@ -2,8 +2,8 @@ use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::thread;
 
-use beankey_daemon::protocol::envelope::Payload;
-use beankey_daemon::{
+use bean_key_daemon::protocol::envelope::Payload;
+use bean_key_daemon::{
     DaemonServer, Engine, PROTOCOL_VERSION, protocol, read_envelope, write_envelope,
 };
 use tempfile::TempDir;
@@ -36,11 +36,11 @@ fn request(stream: &mut UnixStream, envelope: protocol::Envelope) -> protocol::S
 #[test]
 fn serves_isolated_connections_and_exits_after_the_last_disconnect() {
     let runtime = TempDir::new().unwrap();
-    let socket = runtime.path().join("beankey/daemon.sock");
+    let socket = runtime.path().join("bean-key/daemon.sock");
     let server = DaemonServer::bind(
         Engine::open(dictionary_root()).unwrap(),
         runtime.path(),
-        "beankey/daemon.sock",
+        "bean-key/daemon.sock",
     )
     .unwrap();
     let worker = thread::spawn(move || server.run().unwrap());

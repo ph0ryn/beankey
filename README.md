@@ -1,6 +1,6 @@
-# beankey for fcitx5 on NixOS
+# beanKey for fcitx5 on NixOS
 
-beankeyは、[azooKey Desktop](https://github.com/azooKey/azooKey-Desktop)の日本語入力体験を、NixOS上のFcitx5で使うための日本語入力エンジンです。
+beanKeyは、[azooKey Desktop](https://github.com/azooKey/azooKey-Desktop)の日本語入力体験を、NixOS上のFcitx5で使うための日本語入力エンジンです。
 
 ニューラルかな漢字変換システムには、[zenz-v3.2-small-gguf](https://huggingface.co/Miwa-Keita/zenz-v3.2-small-gguf)を使用します。
 
@@ -21,7 +21,7 @@ azooKey DesktopのAI変換、UI、独自候補ウィンドウは実装しませ�
 
 ### azooKey Desktopとの違い
 
-beankeyは、AzooKeyKanaKanjiConverterのかな漢字変換機能と、azooKey Desktopの日本語入力操作を参照しています。ただし、azooKey Desktopそのものを移植するものではありません。
+beanKeyは、AzooKeyKanaKanjiConverterのかな漢字変換機能と、azooKey Desktopの日本語入力操作を参照しています。ただし、azooKey Desktopそのものを移植するものではありません。
 
 次の機能は対象外です。
 
@@ -42,28 +42,28 @@ Wayland、`aarch64-linux`、NixOS以外のLinuxディストリビューション
 
 ## インストール
 
-NixOS flakeへbeankeyを追加し、NixOS moduleを読み込みます。
+NixOS flakeへbeanKeyを追加し、NixOS moduleを読み込みます。
 
 ```nix
 {
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
-    beankey = {
-      url = "git+https://github.com/ph0ryn/beankey.git?ref=main&submodules=1";
+    beanKey = {
+      url = "git+https://github.com/ph0ryn/beanKey.git?ref=main&submodules=1";
       inputs.nixpkgs.follows = "nixpkgs";
     };
   };
 
   outputs =
-    { beankey, nixpkgs, ... }:
+    { beanKey, nixpkgs, ... }:
     {
       nixosConfigurations.my-host = nixpkgs.lib.nixosSystem {
         system = "x86_64-linux";
         modules = [
-          beankey.nixosModules.default
+          beanKey.nixosModules.default
           {
-            programs.beankey.enable = true;
+            programs.beanKey.enable = true;
           }
         ];
       };
@@ -71,16 +71,16 @@ NixOS flakeへbeankeyを追加し、NixOS moduleを読み込みます。
 }
 ```
 
-Switch後にFcitx5を再起動し、Fcitx5の入力メソッド設定から`beankey`を追加してください。
+Switch後にFcitx5を再起動し、Fcitx5の入力メソッド設定から`beanKey`を追加してください。
 
 ## 設定
 
 設定例
 
 ```nix
-programs.beankey = {
+programs.beanKey = {
   enable = true;
-  useBeankeyTheme = true;
+  useBeanKeyTheme = true;
 
   conversion = {
     inputStyle = "roman_to_kana";
@@ -129,7 +129,7 @@ MIT
 
 ### 参照実装
 
-beankeyは、次の実装を設計と動作の基準として参照しています。
+beanKeyは、次の実装を設計と動作の基準として参照しています。
 
 - [AzooKeyKanaKanjiConverter](https://github.com/azooKey/AzooKeyKanaKanjiConverter/tree/93766c46e31fa6a18b7ced49dab31337780f6f45): かな漢字変換とZenzai
 - [azooKey Desktop](https://github.com/azooKey/azooKey-Desktop/tree/3ae5a4651c329d48fee9b9ec7ac1bcd60b940a12): 日本語入力の操作と表示

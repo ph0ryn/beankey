@@ -7,9 +7,9 @@
 #include <cstdint>
 #include <string>
 
-#include "beankey.pb.h"
+#include "bean_key.pb.h"
 
-namespace beankey {
+namespace bean_key {
 namespace {
 
 std::string printableKeyText(fcitx::KeySym symbol) {
@@ -147,4 +147,4 @@ void populateKeyEvent(const fcitx::KeyEvent &source, v1::KeyEvent *target) {
   target->set_intention(japaneseInputText(rawText));
 }
 
-} // namespace beankey
+} // namespace bean_key

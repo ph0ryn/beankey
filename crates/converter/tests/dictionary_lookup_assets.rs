@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use beankey_converter::{CharacterIdMap, Louds, escaped_identifier, parse_entry_shard};
+use bean_key_converter::{CharacterIdMap, Louds, escaped_identifier, parse_entry_shard};
 
 fn dictionary_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

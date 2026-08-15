@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use beankey_converter::{MeaningMatrix, parse_connection_cost_line};
+use bean_key_converter::{MeaningMatrix, parse_connection_cost_line};
 
 fn dictionary_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

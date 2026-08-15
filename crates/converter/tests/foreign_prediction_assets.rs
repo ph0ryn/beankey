@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use beankey_converter::{
+use bean_key_converter::{
     ConversionSession, DictionaryStore, HunspellCompleter, InputStyle, InputTableRegistry,
     KeyboardLanguage, NormalConverter, PredictionMode, RequestOptions,
 };
@@ -16,8 +16,8 @@ fn dictionary_root() -> PathBuf {
 fn completes_english_and_greek_with_the_pinned_hunspell_dictionaries() {
     let provider = Arc::new(
         HunspellCompleter::open(
-            env!("BEANKEY_TEST_EN_US_DICTIONARY"),
-            env!("BEANKEY_TEST_EL_GR_DICTIONARY"),
+            env!("BEAN_KEY_TEST_EN_US_DICTIONARY"),
+            env!("BEAN_KEY_TEST_EL_GR_DICTIONARY"),
         )
         .unwrap(),
     );

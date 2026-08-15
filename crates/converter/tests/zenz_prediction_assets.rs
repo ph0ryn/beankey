@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use beankey_converter::{
+use bean_key_converter::{
     ComposingCount, ConversionSession, DictionaryStore, InputStyle, InputTableRegistry,
     NormalConverter, ZenzInferenceError, ZenzLanguageModel, ZenzVersionConfig,
 };
@@ -118,7 +118,7 @@ fn converts_generated_input_when_dictionary_prediction_is_empty() {
                     &converter,
                     &tables,
                     1,
-                    &beankey_converter::PrefixConstraint::default(),
+                    &bean_key_converter::PrefixConstraint::default(),
                 )?;
                 Ok(())
             },

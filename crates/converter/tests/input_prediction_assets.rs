@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use beankey_converter::{
+use bean_key_converter::{
     ConversionSession, DictionaryStore, InputStyle, InputTableRegistry, NormalConverter,
 };
 
@@ -82,7 +82,7 @@ fn keeps_compatible_predictions_while_a_roman_suffix_is_unresolved() {
             .any(|candidate| candidate.text == expected)
     );
     assert!(unresolved.iter().all(|candidate| {
-        candidate.composing_count == beankey_converter::ComposingCount::Surface(4)
+        candidate.composing_count == bean_key_converter::ComposingCount::Surface(4)
     }));
 }
 

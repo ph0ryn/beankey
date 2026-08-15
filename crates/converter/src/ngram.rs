@@ -318,7 +318,7 @@ fn with_suffix(prefix: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(value)
 }
 
-struct MarisaTrie(NonNull<BeankeyMarisaTrie>);
+struct MarisaTrie(NonNull<BeanKeyMarisaTrie>);
 
 impl MarisaTrie {
     fn load(path: PathBuf) -> Result<Self, NGramError> {
@@ -329,7 +329,7 @@ impl MarisaTrie {
             CString::new(path_string).map_err(|_| NGramError::InvalidPath(path.clone()))?;
         // SAFETY: path_c is a valid null-terminated string for the duration of the call. The C++
         // boundary catches exceptions and returns null on failure.
-        let trie = unsafe { beankey_marisa_load(path_c.as_ptr()) };
+        let trie = unsafe { bean_key_marisa_load(path_c.as_ptr()) };
         NonNull::new(trie)
             .map(Self)
             .ok_or(NGramError::LoadTrie(path))
@@ -387,7 +387,7 @@ impl MarisaTrie {
         // SAFETY: self owns a live read-only trie, query remains valid for the call, collect obeys
         // the callback ABI, and output remains live and exclusively borrowed through context.
         let succeeded = unsafe {
-            beankey_marisa_predictive_search(
+            bean_key_marisa_predictive_search(
                 self.0.as_ptr(),
                 query.as_ptr(),
                 query.len(),
@@ -407,8 +407,8 @@ unsafe impl Sync for MarisaTrie {}
 
 impl Drop for MarisaTrie {
     fn drop(&mut self) {
-        // SAFETY: The pointer was returned by beankey_marisa_load and is freed exactly once.
-        unsafe { beankey_marisa_free(self.0.as_ptr()) };
+        // SAFETY: The pointer was returned by bean_key_marisa_load and is freed exactly once.
+        unsafe { bean_key_marisa_free(self.0.as_ptr()) };
     }
 }
 
@@ -446,17 +446,17 @@ fn decode_value(value: &[u8]) -> Result<u32, NGramError> {
 }
 
 #[repr(C)]
-struct BeankeyMarisaTrie {
+struct BeanKeyMarisaTrie {
     _private: [u8; 0],
 }
 
 type MarisaVisitor = unsafe extern "C" fn(*const u8, usize, *mut c_void) -> bool;
 
 unsafe extern "C" {
-    fn beankey_marisa_load(path: *const c_char) -> *mut BeankeyMarisaTrie;
-    fn beankey_marisa_free(trie: *mut BeankeyMarisaTrie);
-    fn beankey_marisa_predictive_search(
-        trie: *const BeankeyMarisaTrie,
+    fn bean_key_marisa_load(path: *const c_char) -> *mut BeanKeyMarisaTrie;
+    fn bean_key_marisa_free(trie: *mut BeanKeyMarisaTrie);
+    fn bean_key_marisa_predictive_search(
+        trie: *const BeanKeyMarisaTrie,
         query: *const u8,
         query_size: usize,
         visitor: MarisaVisitor,

@@ -1,5 +1,5 @@
 {
-  description = "Development environment for beankey";
+  description = "Development environment for beanKey";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";

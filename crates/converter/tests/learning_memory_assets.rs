@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::{fs, process};
 
-use beankey_converter::{
+use bean_key_converter::{
     ConversionSession, DictionaryMetadata, DictionaryStore, InputStyle, InputTableRegistry,
     LearningMemory, LearningMode, NormalConverter,
 };
@@ -14,7 +14,7 @@ fn dictionary_root() -> PathBuf {
 
 fn temporary_directory() -> PathBuf {
     std::env::temp_dir().join(format!(
-        "beankey-learning-{}-{}",
+        "bean-key-learning-{}-{}",
         process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use beankey_converter::{
+use bean_key_converter::{
     ConversionSession, DictionaryStore, InputStyle, InputTableRegistry, NormalConverter,
     PostCompositionPredictor, TextReplacer,
 };
@@ -76,7 +76,7 @@ fn places_up_to_three_base_emojis_before_other_post_composition_predictions() {
     assert!(predictions[..3].iter().all(|item| {
         matches!(
             &item.kind,
-            beankey_converter::PostPredictionKind::Additional { entries }
+            bean_key_converter::PostPredictionKind::Additional { entries }
                 if entries.len() == 1 && entries[0].ruby == "エモジ"
         )
     }));

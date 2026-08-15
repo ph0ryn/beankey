@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use beankey_converter::TextReplacer;
+use bean_key_converter::TextReplacer;
 
 fn emoji_dictionary_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

@@ -841,7 +841,7 @@ mod tests {
 
     fn temporary_directory(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
-            "beankey-{name}-{}-{}",
+            "bean-key-{name}-{}-{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)

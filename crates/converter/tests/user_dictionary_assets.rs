@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::{fs, time::SystemTime};
 
-use beankey_converter::{
+use bean_key_converter::{
     ConversionSession, DictionaryEntry, DictionaryMetadata, DictionaryStore, InputStyle,
     InputTableRegistry, NormalConverter, PredictionMode, RequestOptions,
 };
@@ -17,7 +17,7 @@ fn user_dictionary_root() -> PathBuf {
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    std::env::temp_dir().join(format!("beankey-user-dictionary-{nonce}"))
+    std::env::temp_dir().join(format!("bean-key-user-dictionary-{nonce}"))
 }
 
 fn entry_block(word: &str, ruby: &str) -> Vec<u8> {
@@ -166,7 +166,7 @@ fn expands_dynamic_dictionary_templates_before_exposing_candidates() {
 fn loads_generated_user_dictionary_and_shortcut_files() {
     let user_root = user_dictionary_root();
     fs::create_dir(&user_root).unwrap();
-    write_user_dictionary(&user_root, "user", "BeanKey", "ビーンズキー");
+    write_user_dictionary(&user_root, "user", "beanKey", "ビーンズキー");
     write_user_dictionary(
         &user_root,
         "user_shortcuts",
@@ -187,7 +187,7 @@ fn loads_generated_user_dictionary_and_shortcut_files() {
     let candidate = result
         .main_results
         .iter()
-        .find(|candidate| candidate.text == "BeanKey")
+        .find(|candidate| candidate.text == "beanKey")
         .expect("file user dictionary candidate");
     assert!(
         candidate.entries[0]

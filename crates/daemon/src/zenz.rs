@@ -2,13 +2,13 @@ use std::error::Error;
 use std::fmt;
 use std::path::Path;
 
-use beankey_converter::{
+use bean_key_converter::{
     Candidate, CandidateEvaluation, ConversionSession, DictionaryError, DictionaryMetadata,
     EfficientNGram, InputTableRegistry, NGramError, NormalConverter, PrefixConstraint,
     ZenzEvaluationRequest, ZenzEvaluator, ZenzInferenceError, ZenzInferenceSequence,
     ZenzLanguageModel, ZenzPersonalization, ZenzVersionConfig, to_katakana,
 };
-use beankey_llama::{LlamaContext, LlamaError, LlamaSequence};
+use bean_key_llama::{LlamaContext, LlamaError, LlamaSequence};
 
 pub const DEFAULT_INFERENCE_LIMIT: usize = 10;
 const PERSONALIZATION_N: usize = 5;
@@ -407,7 +407,7 @@ fn insert_rich_candidates(
     tables: &InputTableRegistry,
     inserted: &mut Vec<Candidate>,
     constructed: &[Candidate],
-    alternatives: Vec<beankey_converter::AlternativeConstraint>,
+    alternatives: Vec<bean_key_converter::AlternativeConstraint>,
 ) -> Result<(), DictionaryError> {
     for alternative in alternatives
         .into_iter()
@@ -454,7 +454,7 @@ fn candidate_uses_personal_dictionary(candidate: &Candidate) -> bool {
 mod tests {
     use std::path::PathBuf;
 
-    use beankey_converter::{
+    use bean_key_converter::{
         ConversionSession, DictionaryStore, InputStyle, InputTableRegistry, NormalConverter,
         ZenzEvaluator, ZenzInferenceError, ZenzLanguageModel, ZenzV3Config, ZenzVersionConfig,
     };
@@ -664,16 +664,16 @@ mod tests {
                 &converter,
                 &tables,
                 2,
-                &beankey_converter::PrefixConstraint::default(),
+                &bean_key_converter::PrefixConstraint::default(),
             )
             .unwrap()
             .to_vec();
         let candidate = candidates[0].clone();
-        let mut constraint = beankey_converter::PrefixConstraint::new(b"x".to_vec());
+        let mut constraint = bean_key_converter::PrefixConstraint::new(b"x".to_vec());
 
         let action = review_rejection(
             &mut constraint,
-            beankey_converter::PrefixConstraint::new(b"x".to_vec()),
+            bean_key_converter::PrefixConstraint::new(b"x".to_vec()),
             &candidates,
             0,
             &candidate,

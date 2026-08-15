@@ -1,21 +1,21 @@
 # 設定リファレンス
 
-beankeyの設定は、すべて`programs.beankey`配下にあります。
+beanKeyの設定は、すべて`programs.beanKey`配下にあります。
 
 ## 最小設定
 
 ```nix
-programs.beankey.enable = true;
+programs.beanKey.enable = true;
 ```
 
-この設定によりFcitx5が有効になり、beankeyアドオン、変換デーモン、辞書、GGUFモデルが導入されます。
+この設定によりFcitx5が有効になり、beanKeyアドオン、変換デーモン、辞書、GGUFモデルが導入されます。
 
 ## 設定例
 
 ```nix
-programs.beankey = {
+programs.beanKey = {
   enable = true;
-  useBeankeyTheme = true;
+  useBeanKeyTheme = true;
 
   conversion = {
     inputStyle = "roman_to_kana";
@@ -42,14 +42,14 @@ programs.beankey = {
 
 | option | 型 | 初期値 | 説明 |
 | --- | --- | --- | --- |
-| `enable` | `bool` | `false` | beankeyとFcitx5統合を有効化 |
-| `useBeankeyTheme` | `bool` | `false` | 同梱のFcitx5 Classic UIテーマを適用 |
+| `enable` | `bool` | `false` | beanKeyとFcitx5統合を有効化 |
+| `useBeanKeyTheme` | `bool` | `false` | 同梱のFcitx5 Classic UIテーマを適用 |
 
-`useBeankeyTheme`はClassic UIのテーマ、フォント、accent color設定に既定値を設定します。ほかのNixOS設定で明示した値がある場合は、そちらが優先されます。
+`useBeanKeyTheme`はClassic UIのテーマ、フォント、accent color設定に既定値を設定します。ほかのNixOS設定で明示した値がある場合は、そちらが優先されます。
 
 ## 変換
 
-`programs.beankey.conversion`で入力方式と候補生成を設定します。
+`programs.beanKey.conversion`で入力方式と候補生成を設定します。
 
 | option | 型 | 初期値 | 説明 |
 | --- | --- | --- | --- |
@@ -101,7 +101,7 @@ programs.beankey = {
 `inputStyle = "custom"`を使う場合は、`customInputTables`へJSONファイルを登録し、その名前を`customInputTable`へ指定します。
 
 ```nix
-programs.beankey.conversion = {
+programs.beanKey.conversion = {
   inputStyle = "custom";
   customInputTable = "my-table";
   customInputTables.my-table = ./my-input-table.json;
@@ -113,8 +113,8 @@ programs.beankey.conversion = {
 ### ユーザー辞書
 
 ```nix
-programs.beankey.conversion = {
-  userDictionary = "/home/me/.config/beankey/user.json";
+programs.beanKey.conversion = {
+  userDictionary = "/home/me/.config/bean-key/user.json";
   userDictionaryDirectory = "/home/me/.local/share/azookey/user-dictionary";
 };
 ```
@@ -123,7 +123,7 @@ programs.beankey.conversion = {
 
 ## 学習
 
-`programs.beankey.learning`で候補選択の学習を設定します。
+`programs.beanKey.learning`で候補選択の学習を設定します。
 
 | option | 型 | 初期値 | 説明 |
 | --- | --- | --- | --- |
@@ -138,7 +138,7 @@ programs.beankey.conversion = {
 
 ## Zenzai
 
-`programs.beankey.zenz`で、固定GGUFモデルによる候補評価を設定します。モデル自体を差し替えるoptionはありません。
+`programs.beanKey.zenz`で、固定GGUFモデルによる候補評価を設定します。モデル自体を差し替えるoptionはありません。
 
 | option | 型 | 初期値 | 説明 |
 | --- | --- | --- | --- |
@@ -155,7 +155,7 @@ programs.beankey.conversion = {
 ### 個人化
 
 ```nix
-programs.beankey.zenz.personalization = {
+programs.beanKey.zenz.personalization = {
   baseNgram = "/absolute/path/to/base/lm";
   personalNgram = "/absolute/path/to/personal/lm";
   alpha = 1.0;
@@ -166,7 +166,7 @@ programs.beankey.zenz.personalization = {
 
 ## 言語モデル入力訂正
 
-`programs.beankey.lmTypo`は実験的な入力訂正機能です。
+`programs.beanKey.lmTypo`は実験的な入力訂正機能です。
 
 | option | 型 | 初期値 | 説明 |
 | --- | --- | --- | --- |
@@ -184,7 +184,7 @@ programs.beankey.zenz.personalization = {
 `languageModel`には`"zenz"`または`"ngram"`を指定できます。`"ngram"`を選ぶ場合は`ngram`も必要です。
 
 ```nix
-programs.beankey.lmTypo = {
+programs.beanKey.lmTypo = {
   enabled = true;
   languageModel = "ngram";
   ngram = {

@@ -5,17 +5,17 @@
 
 namespace fcitx {
 
-class BeankeyEngineFactory final : public AddonFactory {
+class BeanKeyEngineFactory final : public AddonFactory {
 public:
   AddonInstance *create(AddonManager *manager) override {
-    return new BeankeyEngine(manager->instance());
+    return new BeanKeyEngine(manager->instance());
   }
 };
 
 } // namespace fcitx
 
 #ifdef FCITX_ADDON_FACTORY_V2
-FCITX_ADDON_FACTORY_V2(beankey, fcitx::BeankeyEngineFactory)
+FCITX_ADDON_FACTORY_V2(bean_key, fcitx::BeanKeyEngineFactory)
 #else
-FCITX_ADDON_FACTORY(fcitx::BeankeyEngineFactory)
+FCITX_ADDON_FACTORY(fcitx::BeanKeyEngineFactory)
 #endif

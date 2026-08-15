@@ -4,16 +4,16 @@
 #include <cstdint>
 #include <new>
 
-struct BeankeyMarisaTrie {
+struct BeanKeyMarisaTrie {
   marisa::Trie trie;
 };
 
-extern "C" BeankeyMarisaTrie *beankey_marisa_load(const char *path) noexcept {
+extern "C" BeanKeyMarisaTrie *bean_key_marisa_load(const char *path) noexcept {
   if (path == nullptr) {
     return nullptr;
   }
   try {
-    auto *trie = new BeankeyMarisaTrie;
+    auto *trie = new BeanKeyMarisaTrie;
     trie->trie.load(path);
     return trie;
   } catch (...) {
@@ -21,16 +21,16 @@ extern "C" BeankeyMarisaTrie *beankey_marisa_load(const char *path) noexcept {
   }
 }
 
-extern "C" void beankey_marisa_free(BeankeyMarisaTrie *trie) noexcept {
+extern "C" void bean_key_marisa_free(BeanKeyMarisaTrie *trie) noexcept {
   delete trie;
 }
 
-using BeankeyMarisaVisitor = bool (*)(const std::uint8_t *, std::size_t,
+using BeanKeyMarisaVisitor = bool (*)(const std::uint8_t *, std::size_t,
                                       void *);
 
-extern "C" bool beankey_marisa_predictive_search(
-    const BeankeyMarisaTrie *trie, const std::uint8_t *query,
-    std::size_t query_size, BeankeyMarisaVisitor visitor,
+extern "C" bool bean_key_marisa_predictive_search(
+    const BeanKeyMarisaTrie *trie, const std::uint8_t *query,
+    std::size_t query_size, BeanKeyMarisaVisitor visitor,
     void *visitor_context) noexcept {
   if (trie == nullptr || (query == nullptr && query_size != 0) ||
       visitor == nullptr) {

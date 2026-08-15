@@ -6,7 +6,7 @@
   ...
 }:
 let
-  cfg = config.programs.beankey;
+  cfg = config.programs.beanKey;
   inherit (lib)
     mkEnableOption
     mkIf
@@ -144,16 +144,16 @@ let
     ngram = {
       inherit (cfg.lmTypo.ngram) discount n;
       prefix = cfg.lmTypo.ngram.prefix;
-      tokenizer = "${packages.tokenizer}/share/beankey/tokenizer/tokenizer.json";
+      tokenizer = "${packages.tokenizer}/share/bean-key/tokenizer/tokenizer.json";
     };
   };
 
-  configFile = (pkgs.formats.toml { }).generate "beankey-config.toml" {
-    dictionary = "${packages.dictionary}/share/beankey/dictionary";
-    model = "${packages.model}/share/beankey/model/ggml-model-Q5_K_M.gguf";
-    emoji_dictionary = "${packages.emoji}/share/beankey/emoji/emoji_all_E17.0.txt";
+  configFile = (pkgs.formats.toml { }).generate "bean-key-config.toml" {
+    dictionary = "${packages.dictionary}/share/bean-key/dictionary";
+    model = "${packages.model}/share/bean-key/model/ggml-model-Q5_K_M.gguf";
+    emoji_dictionary = "${packages.emoji}/share/bean-key/emoji/emoji_all_E17.0.txt";
     llama_backend_directory = "${packages.daemon.llamaCpp}/bin";
-    runtime_socket = "beankey/daemon.sock";
+    runtime_socket = "bean-key/daemon.sock";
     hunspell = {
       english_dictionary = "${packages.daemon.hunspellEnglish}/share/hunspell/en_US";
       greek_dictionary = "${packages.daemon.hunspellGreek}/share/hunspell/el_GR";
@@ -174,12 +174,12 @@ let
   };
 in
 {
-  options.programs.beankey = {
-    enable = mkEnableOption "beankey kana-kanji conversion for Fcitx5";
-    useBeankeyTheme = mkOption {
+  options.programs.beanKey = {
+    enable = mkEnableOption "beanKey kana-kanji conversion for Fcitx5";
+    useBeanKeyTheme = mkOption {
       type = types.bool;
       default = false;
-      description = "Whether to apply the Beankey Fcitx5 Classic UI theme.";
+      description = "Whether to apply the beanKey Fcitx5 Classic UI theme.";
     };
 
     conversion = {
@@ -392,15 +392,15 @@ in
             cfg.conversion.customInputTable != null
             && builtins.hasAttr cfg.conversion.customInputTable cfg.conversion.customInputTables
           );
-        message = "programs.beankey.conversion.customInputTable must name a registered table when inputStyle is custom";
+        message = "programs.beanKey.conversion.customInputTable must name a registered table when inputStyle is custom";
       }
       {
         assertion = cfg.zenz.personalization == null || cfg.zenz.personalization.alpha >= 0.0;
-        message = "programs.beankey.zenz.personalization.alpha must be nonnegative";
+        message = "programs.beanKey.zenz.personalization.alpha must be nonnegative";
       }
       {
         assertion = cfg.lmTypo.languageModel != "ngram" || cfg.lmTypo.ngram != null;
-        message = "programs.beankey.lmTypo.ngram is required when languageModel is ngram";
+        message = "programs.beanKey.lmTypo.ngram is required when languageModel is ngram";
       }
       {
         assertion = builtins.all (value: value == null || lib.hasPrefix "/" value) [
@@ -410,7 +410,7 @@ in
           (if cfg.zenz.personalization == null then null else cfg.zenz.personalization.personalNgram)
           (if cfg.lmTypo.ngram == null then null else cfg.lmTypo.ngram.prefix)
         ];
-        message = "programs.beankey runtime data paths must be absolute";
+        message = "programs.beanKey runtime data paths must be absolute";
       }
     ];
 
@@ -419,16 +419,16 @@ in
       type = "fcitx5";
       fcitx5 = {
         addons = [ packages.fcitx5-addon ];
-        settings.addons = optionalAttrs cfg.useBeankeyTheme {
+        settings.addons = optionalAttrs cfg.useBeanKeyTheme {
           classicui.globalSection = {
             Font = lib.mkDefault "Sans 13";
-            Theme = lib.mkDefault "beankey";
+            Theme = lib.mkDefault "beanKey";
             UseAccentColor = lib.mkDefault "False";
           };
         };
       };
     };
     environment.systemPackages = [ packages.daemon ];
-    environment.etc."beankey/config.toml".source = configFile;
+    environment.etc."bean-key/config.toml".source = configFile;
   };
 }

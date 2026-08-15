@@ -1,13 +1,16 @@
 [package]
-name = "beankey-daemon"
+name = "bean-key-daemon"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[lib]
+name = "bean_key_daemon"
+
 [dependencies]
-beankey-converter = { path = "../converter" }
-beankey-llama = { path = "../llama" }
+bean-key-converter = { path = "../converter" }
+bean-key-llama = { path = "../llama" }
 libc = "0.2.189"
 prost.workspace = true
 serde = { version = "1.0.229", features = ["derive"] }

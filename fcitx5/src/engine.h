@@ -10,7 +10,7 @@
 #include <string>
 #include <vector>
 
-#include "beankey.pb.h"
+#include "bean_key.pb.h"
 #include "client.h"
 
 namespace fcitx {
@@ -19,12 +19,12 @@ class Instance;
 class InputContext;
 class KeyEvent;
 
-class BeankeyEngine;
+class BeanKeyEngine;
 
-class BeankeyState final : public InputContextProperty {
+class BeanKeyState final : public InputContextProperty {
 public:
-  BeankeyState(InputContext *inputContext, BeankeyEngine *engine);
-  ~BeankeyState() override;
+  BeanKeyState(InputContext *inputContext, BeanKeyEngine *engine);
+  ~BeanKeyState() override;
 
   bool focusIn();
   void focusOut(bool commitComposition = false);
@@ -40,20 +40,20 @@ public:
 
 private:
   bool start();
-  bool pageCandidates(beankey::v1::PageCandidates::Direction direction);
+  bool pageCandidates(bean_key::v1::PageCandidates::Direction direction);
   bool commitComposition();
-  bool send(beankey::v1::Envelope request,
-            const std::vector<beankey::v1::CursorAction> &commitActions = {});
-  bool apply(const beankey::v1::Envelope &response,
-             const std::vector<beankey::v1::CursorAction> &commitActions);
-  void showTypoCorrections(const beankey::v1::TypoCorrectionResponse &response);
-  void fillSurroundingText(beankey::v1::SurroundingText *surrounding) const;
+  bool send(bean_key::v1::Envelope request,
+            const std::vector<bean_key::v1::CursorAction> &commitActions = {});
+  bool apply(const bean_key::v1::Envelope &response,
+             const std::vector<bean_key::v1::CursorAction> &commitActions);
+  void showTypoCorrections(const bean_key::v1::TypoCorrectionResponse &response);
+  void fillSurroundingText(bean_key::v1::SurroundingText *surrounding) const;
   void clearUi();
   void failSession();
-  beankey::v1::Envelope envelope();
+  bean_key::v1::Envelope envelope();
 
   InputContext *inputContext_;
-  BeankeyEngine *engine_;
+  BeanKeyEngine *engine_;
   std::string sessionId_;
   std::uint64_t nextRequestId_ = 1;
   bool started_ = false;
@@ -62,12 +62,12 @@ private:
   bool lmTypoAvailable_ = false;
   bool learningAvailable_ = false;
   bool learningWritable_ = false;
-  std::vector<std::vector<beankey::v1::CursorAction>> candidateActions_;
+  std::vector<std::vector<bean_key::v1::CursorAction>> candidateActions_;
 };
 
-class BeankeyEngine final : public InputMethodEngineV2 {
+class BeanKeyEngine final : public InputMethodEngineV2 {
 public:
-  explicit BeankeyEngine(Instance *instance);
+  explicit BeanKeyEngine(Instance *instance);
 
   void activate(const InputMethodEntry &entry,
                 InputContextEvent &event) override;
@@ -76,15 +76,15 @@ public:
   void keyEvent(const InputMethodEntry &entry, KeyEvent &event) override;
   void reset(const InputMethodEntry &entry, InputContextEvent &event) override;
 
-  BeankeyState *state(InputContext *inputContext);
-  beankey::Client &client();
+  BeanKeyState *state(InputContext *inputContext);
+  bean_key::Client &client();
   bool ensureConnected();
   std::chrono::milliseconds requestTimeout() const;
 
 private:
   Instance *instance_;
-  beankey::Client client_;
-  FactoryFor<BeankeyState> factory_;
+  bean_key::Client client_;
+  FactoryFor<BeanKeyState> factory_;
   SimpleAction resetLearningAction_;
 };
 

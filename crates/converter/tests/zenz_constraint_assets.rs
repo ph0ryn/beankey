@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use beankey_converter::{
+use bean_key_converter::{
     ComposingText, ConversionContext, DictionaryStore, InputStyle, InputTableRegistry,
     NormalConverter, PrefixConstraint,
 };
