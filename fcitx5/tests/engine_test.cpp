@@ -170,7 +170,18 @@ int main() {
       Forget,
       ResetLearning,
       Typo,
+      SelectCandidate,
       SelectTypo
+    };
+    const auto addCandidates = [](beankey::v1::StateResponse *state) {
+      for (int index = 0; index < 10; ++index) {
+        auto *candidate = state->add_candidates();
+        candidate->set_index(index);
+        candidate->set_text(
+            index == 0 ? "司会" : "Candidate " + std::to_string(index + 1));
+        candidate->set_annotation(index == 0 ? "noun" : "");
+        candidate->mutable_composing_count()->set_input(1);
+      }
     };
     const auto exchange = [&](ExpectedRequest expected) {
       beankey::v1::Envelope request;
@@ -189,6 +200,9 @@ int main() {
           return request.has_reset_learning();
         case ExpectedRequest::Typo:
           return request.has_request_typo_corrections();
+        case ExpectedRequest::SelectCandidate:
+          return request.has_select_candidate() &&
+                 request.select_candidate().index() == 1;
         case ExpectedRequest::SelectTypo:
           return request.has_select_typo_correction();
         }
@@ -223,11 +237,28 @@ int main() {
           state->set_highlighted_preedit_length(1);
           state->set_selected_candidate(0);
           state->set_candidate_window(beankey::v1::CANDIDATE_WINDOW_SELECTING);
-          auto *candidate = state->add_candidates();
-          candidate->set_text("司会");
-          candidate->set_annotation("noun");
-          candidate->mutable_composing_count()->set_input(1);
+          addCandidates(state);
           state->mutable_prediction()->set_display_text("今日");
+        } else if (expected == ExpectedRequest::Key &&
+                   request.key_event().action() ==
+                       beankey::v1::USER_ACTION_PAGE_DOWN) {
+          state->set_consumed(true);
+          state->set_preedit("Candidate 10");
+          state->set_preedit_cursor(12);
+          state->set_highlighted_preedit_length(12);
+          state->set_selected_candidate(9);
+          state->set_candidate_window(beankey::v1::CANDIDATE_WINDOW_SELECTING);
+          addCandidates(state);
+        } else if (expected == ExpectedRequest::Key &&
+                   request.key_event().action() ==
+                       beankey::v1::USER_ACTION_UP) {
+          state->set_consumed(true);
+          state->set_preedit("Candidate 9");
+          state->set_preedit_cursor(11);
+          state->set_highlighted_preedit_length(11);
+          state->set_selected_candidate(8);
+          state->set_candidate_window(beankey::v1::CANDIDATE_WINDOW_SELECTING);
+          addCandidates(state);
         } else if (expected == ExpectedRequest::Key &&
                    request.key_event().action() ==
                        beankey::v1::USER_ACTION_ENTER) {
@@ -251,6 +282,11 @@ int main() {
           state->set_consumed(true);
           state->set_commit("仮名");
           state->set_reset(true);
+        } else if (expected == ExpectedRequest::SelectCandidate) {
+          state->set_consumed(true);
+          state->set_commit("Candidate 2");
+          state->set_reset(true);
+          state->set_candidate_window(beankey::v1::CANDIDATE_WINDOW_HIDDEN);
         } else if (expected != ExpectedRequest::Key) {
           state->set_consumed(true);
         }
@@ -268,6 +304,8 @@ int main() {
     serverValid = exchange(ExpectedRequest::SelectTypo) && serverValid;
     serverValid = exchange(ExpectedRequest::Key) && serverValid;
     serverValid = exchange(ExpectedRequest::Key) && serverValid;
+    serverValid = exchange(ExpectedRequest::Key) && serverValid;
+    serverValid = exchange(ExpectedRequest::SelectCandidate) && serverValid;
     serverValid = exchange(ExpectedRequest::Key) && serverValid;
     serverValid = exchange(ExpectedRequest::ResetLearning) && serverValid;
     close(connection);
@@ -315,14 +353,14 @@ int main() {
                    "prediction did not reach the Fcitx auxiliary UI") &&
             valid;
     const auto candidates = inputContext.inputPanel().candidateList();
-    valid = report(candidates && candidates->size() == 1,
+    valid = report(candidates && candidates->size() == 9,
                    "daemon candidates did not reach Fcitx") &&
             valid;
     valid = report(candidates && candidates->layoutHint() ==
                                      fcitx::CandidateLayoutHint::Vertical,
                    "daemon candidates did not request a vertical layout") &&
             valid;
-    if (candidates && candidates->size() == 1) {
+    if (candidates && candidates->size() == 9) {
       valid = report(candidates->candidate(0).comment().toString() == "noun",
                      "candidate annotation did not reach Fcitx") &&
               valid;
@@ -390,12 +428,55 @@ int main() {
     valid = report(printableAgain.accepted(),
                    "second consumed printable key was not accepted") &&
             valid;
-    fcitx::KeyEvent enter(&inputContext, fcitx::Key(FcitxKey_Return));
-    engine.keyEvent(entry, enter);
+    fcitx::KeyEvent pageDown(&inputContext, fcitx::Key(FcitxKey_Page_Down));
+    engine.keyEvent(entry, pageDown);
     valid =
-        report(enter.accepted(), "consumed Enter was not accepted") && valid;
-    valid = report(inputContext.committed() == "仮名司会",
-                   "daemon commit did not reach Fcitx") &&
+        report(pageDown.accepted(), "consumed Page Down was not accepted") &&
+        valid;
+    const auto secondPage = inputContext.inputPanel().candidateList();
+    const auto *pageable = secondPage ? secondPage->toPageable() : nullptr;
+    valid = report(pageable && pageable->currentPage() == 0,
+                   "sliding candidate window unexpectedly paged") &&
+            valid;
+    valid = report(secondPage && secondPage->size() == 9,
+                   "sliding candidate window has the wrong size") &&
+            valid;
+    if (secondPage && secondPage->size() == 9) {
+      valid =
+          report(secondPage->candidate(0).text().toString() == "Candidate 2",
+                 "sliding candidate window has the wrong first candidate") &&
+          valid;
+      valid =
+          report(secondPage->candidate(8).text().toString() == "Candidate 10",
+                 "sliding candidate window has the wrong last candidate") &&
+          valid;
+      valid = report(secondPage->cursorIndex() == 8,
+                     "sliding candidate window has the wrong cursor") &&
+              valid;
+    }
+    fcitx::KeyEvent up(&inputContext, fcitx::Key(FcitxKey_Up));
+    engine.keyEvent(entry, up);
+    valid = report(up.accepted(), "consumed Up was not accepted") && valid;
+    const auto retainedWindow = inputContext.inputPanel().candidateList();
+    valid = report(retainedWindow && retainedWindow->size() == 9,
+                   "candidate window changed size while moving within it") &&
+            valid;
+    if (retainedWindow && retainedWindow->size() == 9) {
+      valid = report(retainedWindow->candidate(0).text().toString() ==
+                         "Candidate 2",
+                     "candidate window did not preserve its visible start") &&
+              valid;
+      valid = report(retainedWindow->cursorIndex() == 7,
+                     "candidate window did not move its cursor upward") &&
+              valid;
+    }
+    fcitx::KeyEvent selectFirstVisible(&inputContext, fcitx::Key(FcitxKey_1));
+    engine.keyEvent(entry, selectFirstVisible);
+    valid = report(selectFirstVisible.accepted(),
+                   "first visible candidate selection was not accepted") &&
+            valid;
+    valid = report(inputContext.committed() == "仮名Candidate 2",
+                   "visible candidate number selected the wrong candidate") &&
             valid;
     valid = report(inputContext.inputPanel().clientPreedit().empty(),
                    "committed preedit was not cleared") &&

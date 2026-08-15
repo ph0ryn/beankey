@@ -204,6 +204,12 @@ bool BeankeyState::processKey(KeyEvent &event) {
             dynamic_cast<const BeankeyTypoCorrectionWord *>(&candidate)) {
       return selectTypoCorrection(word->index());
     }
+    if (selectedCandidate_ >= 0) {
+      if (const auto *word =
+              dynamic_cast<const BeankeyCandidateWord *>(&candidate)) {
+        return selectCandidate(word->index());
+      }
+    }
   }
 
   auto request = envelope();
@@ -384,9 +390,24 @@ bool BeankeyState::apply(
       state.candidate_window() == beankey::v1::CANDIDATE_WINDOW_SELECTING;
   if (selecting) {
     candidates->setSelectionKey(Key::keyListFromString("1 2 3 4 5 6 7 8 9"));
+  } else {
+    candidateWindowStart_ = 0;
   }
   candidates->setActionableImpl(std::make_unique<BeankeyCandidateActions>(
       learningWritable_, lmTypoAvailable_));
+  selectedCandidate_ = state.selected_candidate();
+  if (selecting && selectedCandidate_ >= 0) {
+    const auto windowEnd =
+        candidateWindowStart_ + static_cast<int>(kCandidatePageSize);
+    if (selectedCandidate_ < candidateWindowStart_) {
+      candidateWindowStart_ = selectedCandidate_;
+    } else if (selectedCandidate_ >= windowEnd) {
+      candidateWindowStart_ =
+          selectedCandidate_ - static_cast<int>(kCandidatePageSize) + 1;
+    }
+  }
+  const auto candidateWindowEnd =
+      candidateWindowStart_ + static_cast<int>(kCandidatePageSize);
   for (int index = 0; index < state.candidates_size(); ++index) {
     const auto &candidate = state.candidates(index);
     std::vector<beankey::v1::CursorAction> actions;
@@ -399,15 +420,17 @@ bool BeankeyState::apply(
       candidateActions_.resize(sourceIndex + 1);
     }
     candidateActions_[sourceIndex] = std::move(actions);
-    if (selecting || index == 0) {
+    if ((selecting && index >= candidateWindowStart_ &&
+         index < candidateWindowEnd) ||
+        (!selecting && index == 0)) {
       candidates->append<BeankeyCandidateWord>(
           candidate.index(), candidate.text(), candidate.annotation(),
           candidate.has_composing_count(), this);
     }
   }
-  selectedCandidate_ = state.selected_candidate();
   if (selectedCandidate_ >= 0 && selectedCandidate_ < state.candidates_size()) {
-    candidates->setGlobalCursorIndex(selectedCandidate_);
+    candidates->setGlobalCursorIndex(selectedCandidate_ -
+                                     candidateWindowStart_);
   }
 
   auto &panel = inputContext_->inputPanel();
@@ -485,6 +508,7 @@ void BeankeyState::fillSurroundingText(
 void BeankeyState::clearUi() {
   candidateActions_.clear();
   selectedCandidate_ = -1;
+  candidateWindowStart_ = 0;
   lmTypoAvailable_ = false;
   learningAvailable_ = false;
   learningWritable_ = false;

@@ -58,6 +58,7 @@ private:
   std::uint64_t nextRequestId_ = 1;
   bool started_ = false;
   std::int32_t selectedCandidate_ = -1;
+  std::int32_t candidateWindowStart_ = 0;
   bool lmTypoAvailable_ = false;
   bool learningAvailable_ = false;
   bool learningWritable_ = false;
