@@ -86,6 +86,28 @@ int main() {
     valid = false;
   }
 
+  for (const auto &[symbol, expected] :
+       {std::pair{FcitxKey_j, beankey::v1::USER_ACTION_HIRAGANA},
+        std::pair{FcitxKey_semicolon,
+                  beankey::v1::USER_ACTION_HALF_WIDTH_KATAKANA}}) {
+    fcitx::KeyEvent source(nullptr, fcitx::Key(symbol, fcitx::KeyState::Ctrl));
+    beankey::v1::KeyEvent target;
+    beankey::populateKeyEvent(source, &target);
+    if (target.action() != expected || !target.text().empty()) {
+      std::cerr << "known Control shortcut lost its semantic action\n";
+      valid = false;
+    }
+  }
+
+  fcitx::KeyEvent controlDeleteSource(
+      nullptr, fcitx::Key(FcitxKey_Delete, fcitx::KeyState::Ctrl));
+  beankey::v1::KeyEvent controlDeleteTarget;
+  beankey::populateKeyEvent(controlDeleteSource, &controlDeleteTarget);
+  if (controlDeleteTarget.action() != beankey::v1::USER_ACTION_FORGET) {
+    std::cerr << "Control-Delete did not map to candidate forgetting\n";
+    valid = false;
+  }
+
   fcitx::KeyEvent controlQSource(nullptr,
                                  fcitx::Key(FcitxKey_q, fcitx::KeyState::Ctrl));
   beankey::v1::KeyEvent controlQTarget;
@@ -98,21 +120,18 @@ int main() {
 
   fcitx::KeyEvent unicodeSource(
       nullptr,
-      fcitx::Key(FcitxKey_u,
-                 fcitx::KeyStates{fcitx::KeyState::Ctrl,
-                                  fcitx::KeyState::Shift}));
+      fcitx::Key(FcitxKey_u, fcitx::KeyStates{fcitx::KeyState::Ctrl,
+                                              fcitx::KeyState::Shift}));
   beankey::v1::KeyEvent unicodeTarget;
   beankey::populateKeyEvent(unicodeSource, &unicodeTarget);
-  if (unicodeTarget.action() !=
-      beankey::v1::USER_ACTION_START_UNICODE_INPUT) {
+  if (unicodeTarget.action() != beankey::v1::USER_ACTION_START_UNICODE_INPUT) {
     std::cerr << "Control-Shift-U Unicode input was not mapped\n";
     valid = false;
   }
 
-  for (const auto &keyCase :
-       {KeyCase{"Delete", FcitxKey_Delete},
-        KeyCase{"Page Up", FcitxKey_Page_Up},
-        KeyCase{"Page Down", FcitxKey_Page_Down}}) {
+  for (const auto &keyCase : {KeyCase{"Delete", FcitxKey_Delete},
+                              KeyCase{"Page Up", FcitxKey_Page_Up},
+                              KeyCase{"Page Down", FcitxKey_Page_Down}}) {
     fcitx::KeyEvent source(nullptr, fcitx::Key(keyCase.symbol));
     beankey::v1::KeyEvent target;
     beankey::populateKeyEvent(source, &target);
@@ -124,14 +143,40 @@ int main() {
 
   for (const auto &[symbol, expected] :
        {std::pair{FcitxKey_Eisu_toggle, beankey::v1::USER_ACTION_EISU},
-        std::pair{FcitxKey_Hiragana_Katakana,
-                  beankey::v1::USER_ACTION_KANA},
+        std::pair{FcitxKey_Hiragana_Katakana, beankey::v1::USER_ACTION_KANA},
         std::pair{FcitxKey_Kana_Lock, beankey::v1::USER_ACTION_KANA}}) {
     fcitx::KeyEvent source(nullptr, fcitx::Key(symbol));
     beankey::v1::KeyEvent target;
     beankey::populateKeyEvent(source, &target);
     if (target.action() != expected) {
       std::cerr << "input language key was not mapped\n";
+      valid = false;
+    }
+  }
+
+  for (const auto &[symbol, expected] :
+       {std::pair{FcitxKey_F6, beankey::v1::USER_ACTION_HIRAGANA},
+        std::pair{FcitxKey_F7, beankey::v1::USER_ACTION_KATAKANA},
+        std::pair{FcitxKey_F8, beankey::v1::USER_ACTION_HALF_WIDTH_KATAKANA},
+        std::pair{FcitxKey_F9, beankey::v1::USER_ACTION_FULL_WIDTH_ROMAN},
+        std::pair{FcitxKey_F10, beankey::v1::USER_ACTION_HALF_WIDTH_ROMAN}}) {
+    fcitx::KeyEvent source(nullptr, fcitx::Key(symbol));
+    beankey::v1::KeyEvent target;
+    beankey::populateKeyEvent(source, &target);
+    if (target.action() != expected) {
+      std::cerr << "Desktop function key was not mapped\n";
+      valid = false;
+    }
+  }
+
+  for (const auto &[symbol, expected] :
+       {std::pair{FcitxKey_Left, beankey::v1::USER_ACTION_LEFT},
+        std::pair{FcitxKey_Right, beankey::v1::USER_ACTION_RIGHT}}) {
+    fcitx::KeyEvent source(nullptr, fcitx::Key(symbol, fcitx::KeyState::Shift));
+    beankey::v1::KeyEvent target;
+    beankey::populateKeyEvent(source, &target);
+    if (target.action() != expected || !target.shift()) {
+      std::cerr << "Shift navigation lost its segment-edit intention\n";
       valid = false;
     }
   }
