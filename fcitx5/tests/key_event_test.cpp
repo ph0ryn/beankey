@@ -44,6 +44,16 @@ int main() {
     return 1;
   }
 
+  fcitx::KeyEvent longVowelSource(nullptr, fcitx::Key(FcitxKey_minus));
+  beankey::v1::KeyEvent longVowelTarget;
+  beankey::populateKeyEvent(longVowelSource, &longVowelTarget);
+  if (longVowelTarget.action() != beankey::v1::USER_ACTION_INPUT ||
+      longVowelTarget.text() != "ー" || longVowelTarget.input() != "-" ||
+      longVowelTarget.intention() != "ー") {
+    std::cerr << "Japanese hyphen key did not produce a long vowel mark\n";
+    return 1;
+  }
+
   constexpr std::array controlKeys{
       KeyCase{"BackSpace", FcitxKey_BackSpace},
       KeyCase{"Return", FcitxKey_Return},
