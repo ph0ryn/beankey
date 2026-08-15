@@ -3,6 +3,7 @@
 ## プロジェクトの範囲
 
 - beankey は、NixOS で動作するかな漢字変換器を実装するプロジェクトである。
+- beankey はFcitx5 addon版azooKeyとして、公式azooKey Desktopの日本語入力における観測可能な操作感へ合わせる。
 - 製品コードを Swift に依存させない。
 - 独自 GUI は実装対象に含めず、候補表示は Fcitx5 の標準 UI に委ねる。
 - Rust で変換本体と daemon を実装し、Fcitx5 addon は薄い C++20 の層とする。
@@ -16,7 +17,7 @@
 - 利用者向け設定はすべて`programs.beankey`配下へ集約する。手書きのdaemon設定、設定用環境変数または別namespaceを公開しない。
 - 固定した原作スナップショットで確認できるかな漢字変換機能を1機能ずつ実装し、最終的にはすべてを対象にする。MVPやv1などの別成果範囲は設けない。
 - 現段階では各機能がNixOSとFcitx5上で正常に動作することを検証し、原作との厳密な出力・内部trace比較は後続作業とする。
-- Fcitx5連携の状態管理、キーのconsumed判定、プリエディット、候補および確定結果の反映は、[fcitx5-mozc](https://github.com/fcitx/mozc/tree/3f8dea4bdf72c6af200ecdbe3d456871fb1d5e03/src/unix/fcitx5)の構成に準拠する。Mozc固有protocolは流用しない。
+- Fcitx5 APIの利用、キーのconsumed判定、プリエディット、候補および確定結果の反映は、[fcitx5-mozc](https://github.com/fcitx/mozc/tree/3f8dea4bdf72c6af200ecdbe3d456871fb1d5e03/src/unix/fcitx5)の構成に準拠する。日本語入力の状態遷移と表示意味は固定した公式azooKey Desktopを基準にし、Mozc固有protocolは流用しない。
 - Mozcのsource、library、daemonまたは`pkgs.mozc`へ依存しない。原作の生成済み絵文字辞書に含まれるMozc由来dataは、資産のattributionとしてのみ扱う。
 - 他の AzooKeyKanaKanjiConverter の Linux 向け移植は、設計や実装の参考にしない。
 - 原作調査で確認できていない仕様は推測で決めず、未決事項として残す。
@@ -73,6 +74,7 @@
 
 - Unix domain socket、Protobuf、IPC セッション、モデルパスを含む設定および各コンポーネントの接続を所有する。
 - `converter` と `llama` を組み合わせるアプリケーション境界とする。
+- Desktop準拠の入力中、preview中、候補選択中の状態遷移をセッションごとに所有する。
 - `converter` の変換要求と `llama` の推論結果を接続し、Zenzaiの評価とprefix制約付き再探索のループを進行する。
 - 辞書探索や候補順位付けのロジックを持たない。
 - addon から直接起動できる単一のserver executableを提供する。
@@ -82,7 +84,7 @@
 
 ### `fcitx5`
 
-- Fcitx5 の入力状態、キーイベント、標準 UI への候補提示および daemon との通信を所有する。
+- Fcitx5 の入力コンテキスト、キーイベントの意味的操作への正規化、標準 UI への候補提示および daemon との通信を所有する。
 - かな漢字変換やニューラル推論を実装しない。
 - Rust 実装へ直接リンクせず、`proto/beankey.proto` で定義した IPC 境界を利用する。
 - daemonへ接続できない場合はserver executableを起動し、接続を再試行する。
@@ -94,6 +96,7 @@
 - Rust と C++ の間で共有する通信仕様の唯一の正本とする。
 - 生成コードはコミットせず、各ビルドで生成する。
 - 内部実装の都合だけで通信仕様を拡張しない。
+- Fcitx5固有のkey symbolをwireへ流さず、意味的操作、入力状態、候補window、注釈付き候補および独立した予測を表現する。
 - wire formatはvarint length-delimited Protobufとし、各envelopeにprotocol version、request ID、session IDおよびpayloadを持たせる。
 - 1メッセージの上限は1 MiBとし、超過、未知のversion、不正なpayloadは接続単位の明示的なprotocol errorとして扱う。
 
