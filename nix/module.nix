@@ -176,6 +176,11 @@ in
 {
   options.programs.beankey = {
     enable = mkEnableOption "beankey kana-kanji conversion for Fcitx5";
+    useBeankeyTheme = mkOption {
+      type = types.bool;
+      default = false;
+      description = "Whether to apply the Beankey Fcitx5 Classic UI theme.";
+    };
 
     conversion = {
       inputStyle = mkOption {
@@ -412,7 +417,16 @@ in
     i18n.inputMethod = {
       enable = true;
       type = "fcitx5";
-      fcitx5.addons = [ packages.fcitx5-addon ];
+      fcitx5 = {
+        addons = [ packages.fcitx5-addon ];
+        settings.addons = optionalAttrs cfg.useBeankeyTheme {
+          classicui.globalSection = {
+            Font = lib.mkDefault "Sans 13";
+            Theme = lib.mkDefault "beankey";
+            UseAccentColor = lib.mkDefault "False";
+          };
+        };
+      };
     };
     environment.systemPackages = [ packages.daemon ];
     environment.etc."beankey/config.toml".source = configFile;

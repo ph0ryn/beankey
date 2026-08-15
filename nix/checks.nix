@@ -14,6 +14,7 @@ let
       {
         programs.beankey = {
           enable = true;
+          useBeankeyTheme = true;
           conversion = {
             typeBackslash = true;
             typeHalfSpace = true;
@@ -31,13 +32,26 @@ let
     ];
   };
   moduleConfig = moduleEvaluation.config;
+  moduleWithoutThemeEvaluation = nixpkgs.lib.nixosSystem {
+    inherit system;
+    modules = [
+      self.nixosModules.default
+      {
+        programs.beankey.enable = true;
+        system.stateVersion = "26.05";
+      }
+    ];
+  };
+  moduleWithoutThemeConfig = moduleWithoutThemeEvaluation.config;
   moduleConfigSource =
+    assert !(moduleWithoutThemeConfig.environment.etc ? "xdg/fcitx5/conf/classicui.conf");
     assert builtins.elem self.packages.${system}.fcitx5-addon
       moduleConfig.i18n.inputMethod.fcitx5.addons;
     assert builtins.elem self.packages.${system}.daemon moduleConfig.environment.systemPackages;
     assert !(moduleConfig.systemd.services ? beankey);
     assert !(moduleConfig.systemd.sockets ? beankey);
     moduleConfig.environment.etc."beankey/config.toml".source;
+  classicUIConfigSource = moduleConfig.environment.etc."xdg/fcitx5/conf/classicui.conf".source;
 in
 {
   cargo-metadata =
@@ -101,6 +115,11 @@ in
     grep -F 'base_ngram = "/nix/store/beankey-base-ngram/lm"' "$config"
     grep -F 'personal_ngram = "/nix/store/beankey-personal-ngram/lm"' "$config"
     grep -F 'alpha = 1.5' "$config"
+    classic_ui_config=${classicUIConfigSource}
+    grep -F 'Font=Sans 13' "$classic_ui_config"
+    grep -F 'Theme=beankey' "$classic_ui_config"
+    grep -F 'UseAccentColor=False' "$classic_ui_config"
+    test -f ${self.packages.${system}.fcitx5-addon}/share/fcitx5/themes/beankey/theme.conf
     touch "$out"
   '';
 }

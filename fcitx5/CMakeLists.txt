@@ -62,6 +62,7 @@ target_link_libraries(fcitx5-beankey PRIVATE beankey-engine)
 install(TARGETS fcitx5-beankey DESTINATION ${CMAKE_INSTALL_LIBDIR}/fcitx5)
 install(FILES beankey-addon.conf DESTINATION ${CMAKE_INSTALL_DATADIR}/fcitx5/addon RENAME beankey.conf)
 install(FILES beankey-inputmethod.conf DESTINATION ${CMAKE_INSTALL_DATADIR}/fcitx5/inputmethod RENAME beankey.conf)
+install(FILES themes/beankey/theme.conf DESTINATION ${CMAKE_INSTALL_DATADIR}/fcitx5/themes/beankey)
 
 if(BUILD_TESTING)
   add_executable(beankey-client-test tests/client_test.cpp)

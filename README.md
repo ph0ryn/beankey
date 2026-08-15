@@ -15,6 +15,7 @@ flakeの`nixosModules.default`をNixOS構成へ追加したうえで、`programs
 ```nix
 programs.beankey = {
   enable = true;
+  useBeankeyTheme = true;
 
   conversion = {
     typeBackslash = false;
