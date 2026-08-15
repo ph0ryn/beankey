@@ -3,11 +3,13 @@
 - 調査対象: [azooKey/AzooKeyKanaKanjiConverter](https://github.com/azooKey/AzooKeyKanaKanjiConverter)
 - 対象コミット: [`93766c46e31fa6a18b7ced49dab31337780f6f45`](https://github.com/azooKey/AzooKeyKanaKanjiConverter/commit/93766c46e31fa6a18b7ced49dab31337780f6f45)
 - コミット日時: 2026-08-02 23:19:04 +09:00
-- 調査日: 2026-08-14
+- Desktop調査対象: [azooKey/azooKey-Desktop](https://github.com/azooKey/azooKey-Desktop) `3ae5a4651c329d48fee9b9ec7ac1bcd60b940a12`
+- Desktopが固定するconverter: `8e3a6eb89e088efd868aa28dadb74c697df4e6fb`
+- 調査日: 2026-08-15
 
 ## 調査範囲と読み方
 
-この文書は、上記コミットの公式リポジトリ本体、同コミットが固定する公式サブモジュール、公式リポジトリの履歴・Release・Issue・Pull Requestを調べた結果である。他のLinux向け移植、第三者の移植記事、第三者実装、既存のローカル設計文書は参照していない。製品で固定するGGUFモデル`Miwa-Keita/zenz-v3.2-small-gguf`のcommit `c67e03e07d215c869f591b274c1631170d3e11fe`とnixpkgs packageについては、資産条件と原作比較に必要な範囲だけ公式配布元を追加確認し、その旨を明記する。
+この文書は、上記converterコミットの公式リポジトリ本体、同コミットが固定する公式サブモジュール、公式リポジトリの履歴・Release・Issue・Pull Request、および上記Desktopコミットを調べた結果である。他のLinux向け移植、第三者の移植記事、第三者実装、既存のローカル設計文書は参照していない。製品で固定するGGUFモデル`Miwa-Keita/zenz-v3.2-small-gguf`のcommit `c67e03e07d215c869f591b274c1631170d3e11fe`とnixpkgs packageについては、資産条件と原作比較に必要な範囲だけ公式配布元を追加確認し、その旨を明記する。
 
 再実装を評価する場合も、変換精度そのものの良し悪し、他IMEとの比較、原作にない精度改善は対象にしない。対象に選んだ機能について、固定コミットと同じ条件・入力操作列・辞書・モデルを与えたときの入力状態遷移、候補生成と順位、辞書costの解釈、Zenzaiの入力と結果反映を再現できるかを評価軸とする。数値・backend差の境界は「再実装の同等性を評価する境界」で分けて述べる。
 
@@ -35,7 +37,27 @@ Zenzaiは、辞書候補の最終スコアを単純に置き換えるだけで�
 
 ### 未確認事項
 
-実際のIME UIにおけるライブ変換の呼出タイミング、全プラットフォームの性能条件および辞書の全生成元データのprovenanceは、今回の調査範囲だけでは確定できない。直接配布する辞書、GGUFモデル、tokenizerおよび絵文字については、固定revisionの明示条件とpackageへ添付すべきlicense・attributionを確認した。
+全プラットフォームの性能条件および辞書の全生成元データのprovenanceは、今回の調査範囲だけでは確定できない。直接配布する辞書、GGUFモデル、tokenizerおよび絵文字については、固定revisionの明示条件とpackageへ添付すべきlicense・attributionを確認した。
+
+## azooKey Desktopの日本語入力UX
+
+### 確認済みの事実
+
+Desktopの入力状態は`none`、`composing`、`previewing`、`selecting`を区別する。日本語入力中のSpaceは、ライブ変換が有効なら先頭候補を選択した`selecting`へ入り、無効なら先頭候補をmarked textへ反映する`previewing`へ入り、次のSpaceで`selecting`へ移る。候補選択中のEscapeは入力を消去せず、ライブ変換時は`composing`、非ライブ時は`previewing`へ戻る。Tabは入力中に予測を受理し、予測がない場合もconsumedになる（`Core/Sources/Core/InputUtils/InputState.swift`、`ConverterServer+KeyEvent.swift`）。
+
+候補選択はSpaceとDownで次、Shift+SpaceとUpで前へ進み、RightまたはEnterで選択範囲を確定する。残入力があれば再変換を続ける。1から9は表示中の9行へ対応し、0は現在のmarked textを確定して新しい入力を始める。Shift+左右、Control+I/Oは文節長を編集し、F6からF10とControl+J/K/;/L/'はひらがな、カタカナ、半角カナ、全角英数、英数へ変換する（`InputState.swift`、`Actions/UserAction.swift`）。
+
+ライブ変換は既定で有効であり、入力中は最上位の完全一致候補をmarked textへ表示して候補windowを隠す。Backspace直後は変換結果ではなく読みを表示する。ライブ変換が無効な入力中だけ、先頭候補1件を番号なしで候補windowへ表示する。候補選択中のmarked textは、選択候補prefixをfocused、未変換の残りをunfocusedとして分ける（`SegmentsManager.swift`、`CandidateView.swift`）。
+
+候補windowは最大9行で、候補annotationを右側へ表示する。先頭でUpを繰り返すと、ひらがな、カタカナ、半角カナ、全角英数、英数の順に追加候補が1件ずつ上へ現れ、5件表示時の順序は英数、全角英数、半角カナ、カタカナ、ひらがなになる（`SegmentsManager.swift:789-820`、`CandidateView.swift`）。
+
+通常の日本語予測は既定で無効である。有効時は`.manualMix`で通常候補へ混ぜず、入力中だけ別の予測windowへ出す。現在のtargetは末尾の未解決ASCII 1文字を除いて2文字以上必要で、予測の読みはtargetを厳密に延長しなければならない。表示値、追加する読み、削除数を分け、Tabは必要数を削除して予測された読みsuffixをcompositionへ追加する。候補は最大3行の表示構造だが、現在のmanagerは最初の適合候補だけを返す。Backspace後のtypo correctionは同じ表示slotを優先して使い、短時間のcacheで表示のちらつきを防ぐ（`SegmentsManager.swift:850-940`、`CandidateView.swift:112-151`、`ConverterServer+Snapshot.swift`）。
+
+Desktopはleft/right contextを現在行だけから取り、leftは先頭空白、rightは末尾空白を除いたうえで各30文字へ制限する。既定値はライブ変換有効、通常予測無効、全角英数候補有効、半角カナ候補無効、Zenzai推論上限5、alignment separator有効である。
+
+### 実装への帰結
+
+beankeyはmacOS固有候補windowを移植せず、候補、annotation、focused/unfocused marked textおよび予測をFcitx5標準`InputPanel`へ写像する。Fcitx固有key symbolはaddon内で意味的操作へ変換し、daemonのセッション状態機械へ渡す。converterが返す`mainResults`、`predictionResults`、`englishPredictionResults`および`firstClauseResults`の分離をIPC表示境界でも維持する。確定後予測のconverter能力は保持するが、Desktop準拠の通常入力経路では自動候補として表示しない。
 
 ## 1. 公開機能と主要ユースケース
 

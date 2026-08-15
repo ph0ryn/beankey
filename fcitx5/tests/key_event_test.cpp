@@ -37,7 +37,7 @@ int main() {
   fcitx::KeyEvent printableSource(nullptr, fcitx::Key(FcitxKey_a));
   beankey::v1::KeyEvent printableTarget;
   beankey::populateKeyEvent(printableSource, &printableTarget);
-  if (printableTarget.key_sym() != FcitxKey_a ||
+  if (printableTarget.action() != beankey::v1::USER_ACTION_INPUT ||
       printableTarget.text() != "a" || printableTarget.input() != "a" ||
       printableTarget.intention() != "a") {
     std::cerr << "printable key mapping changed unexpectedly\n";
@@ -56,6 +56,33 @@ int main() {
   bool valid = true;
   for (const auto &keyCase : controlKeys) {
     valid = rejectsControlText(keyCase) && valid;
+  }
+  fcitx::KeyEvent backspaceSource(nullptr, fcitx::Key(FcitxKey_BackSpace));
+  beankey::v1::KeyEvent backspaceTarget;
+  beankey::populateKeyEvent(backspaceSource, &backspaceTarget);
+  if (backspaceTarget.action() != beankey::v1::USER_ACTION_BACKSPACE) {
+    std::cerr << "Backspace semantic action was not mapped\n";
+    valid = false;
+  }
+
+  fcitx::KeyEvent controlHSource(nullptr,
+                                 fcitx::Key(FcitxKey_h, fcitx::KeyState::Ctrl));
+  beankey::v1::KeyEvent controlHTarget;
+  beankey::populateKeyEvent(controlHSource, &controlHTarget);
+  if (controlHTarget.action() != beankey::v1::USER_ACTION_BACKSPACE ||
+      !controlHTarget.text().empty()) {
+    std::cerr << "Control-H semantic action was not mapped\n";
+    valid = false;
+  }
+
+  fcitx::KeyEvent shiftedSpaceSource(
+      nullptr, fcitx::Key(FcitxKey_space, fcitx::KeyState::Shift));
+  beankey::v1::KeyEvent shiftedSpaceTarget;
+  beankey::populateKeyEvent(shiftedSpaceSource, &shiftedSpaceTarget);
+  if (shiftedSpaceTarget.action() != beankey::v1::USER_ACTION_SPACE ||
+      !shiftedSpaceTarget.shift()) {
+    std::cerr << "Shift-Space semantic action was not mapped\n";
+    valid = false;
   }
   return valid ? 0 : 1;
 }

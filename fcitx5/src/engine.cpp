@@ -31,7 +31,7 @@ namespace fcitx {
 namespace {
 
 constexpr std::uint32_t kProtocolVersion = 1;
-constexpr std::uint32_t kCandidatePageSize = 10;
+constexpr std::uint32_t kCandidatePageSize = 9;
 constexpr auto kStartupTimeout = std::chrono::milliseconds(5000);
 
 std::atomic<std::uint64_t> nextSessionId{1};
@@ -59,9 +59,14 @@ int byteOffset(const std::string &text, std::size_t characterOffset) {
 class BeankeyCandidateWord final : public CandidateWord {
 public:
   BeankeyCandidateWord(std::uint32_t index, std::string text,
-                       bool regularCandidate, BeankeyState *state)
+                       std::string annotation, bool regularCandidate,
+                       BeankeyState *state)
       : CandidateWord(Text(std::move(text))), index_(index),
-        regularCandidate_(regularCandidate), state_(state) {}
+        regularCandidate_(regularCandidate), state_(state) {
+    if (!annotation.empty()) {
+      setComment(Text(std::move(annotation)));
+    }
+  }
 
   void select(InputContext *) const override {
     state_->selectCandidate(index_);
@@ -176,31 +181,21 @@ void BeankeyState::focusOut(bool commitComposition) {
 }
 
 bool BeankeyState::processKey(KeyEvent &event) {
+  if (event.isRelease()) {
+    return false;
+  }
   if (!start()) {
     failSession();
     return false;
   }
 
-  if (!event.isRelease()) {
-    const auto candidateList = inputContext_->inputPanel().candidateList();
-    const int selection = event.key().digitSelection();
-    if (candidateList && selection >= 0 && selection < candidateList->size()) {
-      const auto &candidate = candidateList->candidate(selection);
-      if (const auto *word =
-              dynamic_cast<const BeankeyCandidateWord *>(&candidate)) {
-        return selectCandidate(word->index());
-      }
-      if (const auto *word =
-              dynamic_cast<const BeankeyTypoCorrectionWord *>(&candidate)) {
-        return selectTypoCorrection(word->index());
-      }
-      return false;
-    }
-    if (event.key().sym() == FcitxKey_Page_Up) {
-      return pageCandidates(beankey::v1::PageCandidates::DIRECTION_PREVIOUS);
-    }
-    if (event.key().sym() == FcitxKey_Page_Down) {
-      return pageCandidates(beankey::v1::PageCandidates::DIRECTION_NEXT);
+  const auto candidateList = inputContext_->inputPanel().candidateList();
+  const int selection = event.key().digitSelection();
+  if (candidateList && selection >= 0 && selection < candidateList->size()) {
+    const auto &candidate = candidateList->candidate(selection);
+    if (const auto *word =
+            dynamic_cast<const BeankeyTypoCorrectionWord *>(&candidate)) {
+      return selectTypoCorrection(word->index());
     }
   }
 
@@ -377,10 +372,13 @@ bool BeankeyState::apply(
   }
 
   candidateActions_.clear();
-  candidateActions_.reserve(state.candidates_size());
   auto candidates = std::make_unique<CommonCandidateList>();
   candidates->setPageSize(kCandidatePageSize);
-  candidates->setSelectionKey(Key::keyListFromString("1 2 3 4 5 6 7 8 9 0"));
+  const bool selecting =
+      state.candidate_window() == beankey::v1::CANDIDATE_WINDOW_SELECTING;
+  if (selecting) {
+    candidates->setSelectionKey(Key::keyListFromString("1 2 3 4 5 6 7 8 9"));
+  }
   candidates->setActionableImpl(std::make_unique<BeankeyCandidateActions>(
       learningWritable_, lmTypoAvailable_));
   for (int index = 0; index < state.candidates_size(); ++index) {
@@ -390,10 +388,16 @@ bool BeankeyState::apply(
     for (const auto &action : candidate.actions()) {
       actions.push_back(action);
     }
-    candidateActions_.push_back(std::move(actions));
-    candidates->append<BeankeyCandidateWord>(
-        static_cast<std::uint32_t>(index), candidate.text(),
-        candidate.has_composing_count(), this);
+    const auto sourceIndex = static_cast<std::size_t>(candidate.index());
+    if (candidateActions_.size() <= sourceIndex) {
+      candidateActions_.resize(sourceIndex + 1);
+    }
+    candidateActions_[sourceIndex] = std::move(actions);
+    if (selecting || index == 0) {
+      candidates->append<BeankeyCandidateWord>(
+          candidate.index(), candidate.text(), candidate.annotation(),
+          candidate.has_composing_count(), this);
+    }
   }
   selectedCandidate_ = state.selected_candidate();
   if (selectedCandidate_ >= 0 && selectedCandidate_ < state.candidates_size()) {
@@ -405,15 +409,32 @@ bool BeankeyState::apply(
     panel.setPreedit(Text());
     panel.setClientPreedit(Text());
   } else {
-    Text preedit(state.preedit(), TextFormatFlag::Underline);
+    Text preedit;
+    const auto highlighted = std::min<std::size_t>(
+        state.highlighted_preedit_length(), characterCount(state.preedit()));
+    const auto highlightedBytes = byteOffset(state.preedit(), highlighted);
+    if (highlightedBytes > 0) {
+      preedit.append(state.preedit().substr(0, highlightedBytes),
+                     TextFormatFlag::HighLight);
+    }
+    if (static_cast<std::size_t>(highlightedBytes) < state.preedit().size()) {
+      preedit.append(state.preedit().substr(highlightedBytes),
+                     TextFormatFlag::Underline);
+    }
     preedit.setCursor(byteOffset(state.preedit(), state.preedit_cursor()));
     panel.setPreedit(preedit);
     panel.setClientPreedit(preedit);
   }
-  if (state.candidates_size() == 0) {
+  if (state.candidate_window() == beankey::v1::CANDIDATE_WINDOW_HIDDEN ||
+      candidates->size() == 0) {
     panel.setCandidateList(nullptr);
   } else {
     panel.setCandidateList(std::move(candidates));
+  }
+  if (state.has_prediction()) {
+    panel.setAuxDown(Text("→ " + state.prediction().display_text()));
+  } else {
+    panel.setAuxDown(Text());
   }
   if (state.reset() && state.preedit().empty() &&
       state.candidates_size() == 0) {
@@ -433,7 +454,7 @@ void BeankeyState::showTypoCorrections(
   selectedCandidate_ = -1;
   auto candidates = std::make_unique<CommonCandidateList>();
   candidates->setPageSize(kCandidatePageSize);
-  candidates->setSelectionKey(Key::keyListFromString("1 2 3 4 5 6 7 8 9 0"));
+  candidates->setSelectionKey(Key::keyListFromString("1 2 3 4 5 6 7 8 9"));
   for (int index = 0; index < response.candidates_size(); ++index) {
     const auto &candidate = response.candidates(index);
     candidates->append<BeankeyTypoCorrectionWord>(

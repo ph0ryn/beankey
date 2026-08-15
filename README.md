@@ -2,7 +2,7 @@
 
 Reimplementation of AzooKeyKanaKanjiConverter for NixOS written in Rust and C++.
 
-> Status: Design phase. Product code has not been implemented yet.
+> Status: Implemented and under active compatibility testing on NixOS and Fcitx5.
 
 Model: [Miwa-Keita/zenz-v3.2-small-gguf](https://huggingface.co/Miwa-Keita/zenz-v3.2-small-gguf)
 

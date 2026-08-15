@@ -1392,7 +1392,7 @@ fn representation_candidate(
     Candidate::single(word, value, composing_count, 501, vec![entry])
 }
 
-fn to_full_width(value: &str) -> String {
+pub(crate) fn to_full_width(value: &str) -> String {
     value
         .chars()
         .map(|character| match character {
@@ -1405,7 +1405,7 @@ fn to_full_width(value: &str) -> String {
         .collect()
 }
 
-fn to_half_width(value: &str) -> String {
+pub(crate) fn to_half_width(value: &str) -> String {
     let mut output = String::new();
     for character in value.chars() {
         let mapped = match character {

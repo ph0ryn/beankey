@@ -197,17 +197,17 @@ in
       };
       japanesePrediction = mkOption {
         type = predictionType;
-        default = "automatic";
+        default = "disabled";
         description = "Japanese prediction mode.";
       };
       foreignPrediction = mkOption {
         type = predictionType;
-        default = "automatic";
+        default = "disabled";
         description = "English and Greek prediction mode.";
       };
       fullWidthRoman = mkOption {
         type = types.bool;
-        default = false;
+        default = true;
         description = "Whether to generate full-width Roman candidates.";
       };
       halfWidthKana = mkOption {
@@ -231,7 +231,7 @@ in
       };
       liveConversion = mkOption {
         type = types.bool;
-        default = false;
+        default = true;
         description = "Whether to display the best exact candidate while composing.";
       };
       userDictionary = absolutePath "Absolute path to a JSON user dictionary.";
@@ -263,7 +263,7 @@ in
     zenz = {
       inferenceLimit = mkOption {
         type = types.ints.unsigned;
-        default = 10;
+        default = 5;
         description = "Maximum Zenz prefix correction attempts.";
       };
       richCandidates = mkOption {
@@ -282,7 +282,7 @@ in
       preference = optionalString "Zenz preference condition.";
       enableAlignmentSeparator = mkOption {
         type = types.bool;
-        default = false;
+        default = true;
         description = "Whether to include alignment separators in Zenz prompts.";
       };
       personalization = mkOption {

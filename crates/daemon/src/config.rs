@@ -79,13 +79,13 @@ impl Default for ConversionConfig {
             custom_input_table: None,
             keyboard_language: KeyboardLanguageConfig::Japanese,
             n_best: 10,
-            japanese_prediction: PredictionConfig::Automatic,
-            foreign_prediction: PredictionConfig::Automatic,
-            full_width_roman: false,
+            japanese_prediction: PredictionConfig::Disabled,
+            foreign_prediction: PredictionConfig::Disabled,
+            full_width_roman: true,
             half_width_kana: false,
             typography: false,
             typo_correction: TypoCorrectionConfig::Automatic,
-            live_conversion: false,
+            live_conversion: true,
             user_dictionary: None,
             user_dictionary_directory: None,
             custom_input_tables: BTreeMap::new(),
@@ -150,14 +150,14 @@ pub struct ZenzConfig {
 impl Default for ZenzConfig {
     fn default() -> Self {
         Self {
-            inference_limit: 10,
+            inference_limit: 5,
             rich_candidates: false,
             predictive_input: false,
             profile: None,
             topic: None,
             style: None,
             preference: None,
-            enable_alignment_separator: false,
+            enable_alignment_separator: true,
             personalization: None,
         }
     }

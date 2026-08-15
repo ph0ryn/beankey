@@ -215,20 +215,30 @@ int main() {
         if (expected == ExpectedRequest::Start) {
           state->set_consumed(true);
         } else if (expected == ExpectedRequest::Key &&
-                   request.key_event().key_sym() == FcitxKey_a) {
+                   request.key_event().action() ==
+                       beankey::v1::USER_ACTION_INPUT) {
           state->set_consumed(true);
           state->set_preedit("かな");
           state->set_preedit_cursor(2);
+          state->set_highlighted_preedit_length(1);
           state->set_selected_candidate(0);
+          state->set_candidate_window(beankey::v1::CANDIDATE_WINDOW_SELECTING);
           auto *candidate = state->add_candidates();
           candidate->set_text("司会");
+          candidate->set_annotation("noun");
           candidate->mutable_composing_count()->set_input(1);
+          state->mutable_prediction()->set_display_text("今日");
         } else if (expected == ExpectedRequest::Key &&
-                   request.key_event().key_sym() == FcitxKey_Return) {
+                   request.key_event().action() ==
+                       beankey::v1::USER_ACTION_ENTER) {
           state->set_consumed(true);
           state->set_commit("司会");
-          state->set_selected_candidate(0);
-          state->add_candidates()->set_text("は");
+          state->set_reset(true);
+          state->set_candidate_window(beankey::v1::CANDIDATE_WINDOW_HIDDEN);
+        } else if (expected == ExpectedRequest::Key &&
+                   request.key_event().action() ==
+                       beankey::v1::USER_ACTION_TAB) {
+          state->set_consumed(true);
         } else if (expected == ExpectedRequest::Forget) {
           state->set_consumed(true);
           state->set_preedit("かな");
@@ -301,10 +311,18 @@ int main() {
         report(inputContext.inputPanel().clientPreedit().toString() == "かな",
                "daemon preedit did not reach Fcitx") &&
         valid;
+    valid = report(inputContext.inputPanel().auxDown().toString() == "→ 今日",
+                   "prediction did not reach the Fcitx auxiliary UI") &&
+            valid;
     const auto candidates = inputContext.inputPanel().candidateList();
     valid = report(candidates && candidates->size() == 1,
                    "daemon candidates did not reach Fcitx") &&
             valid;
+    if (candidates && candidates->size() == 1) {
+      valid = report(candidates->candidate(0).comment().toString() == "noun",
+                     "candidate annotation did not reach Fcitx") &&
+              valid;
+    }
     auto *actionable = candidates ? candidates->toActionable() : nullptr;
     valid = report(actionable != nullptr,
                    "candidate forgetting is not reachable from Fcitx") &&
@@ -374,24 +392,13 @@ int main() {
     valid = report(inputContext.inputPanel().clientPreedit().empty(),
                    "committed preedit was not cleared") &&
             valid;
-    const auto postCandidates = inputContext.inputPanel().candidateList();
-    valid = report(postCandidates && postCandidates->size() == 1,
-                   "post-composition candidate did not reach Fcitx") &&
+    valid = report(inputContext.inputPanel().candidateList() == nullptr,
+                   "post-composition candidates must stay hidden") &&
             valid;
-    auto *postActionable =
-        postCandidates ? postCandidates->toActionable() : nullptr;
-    valid = report(postActionable != nullptr,
-                   "post-composition candidate list is not actionable") &&
-            valid;
-    if (postActionable != nullptr) {
-      valid = report(!postActionable->hasAction(postCandidates->candidate(0)),
-                     "post-composition candidate exposes invalid actions") &&
-              valid;
-    }
 
     fcitx::KeyEvent tab(&inputContext, fcitx::Key(FcitxKey_Tab));
     engine.keyEvent(entry, tab);
-    valid = report(!tab.accepted(), "unconsumed Tab was accepted") && valid;
+    valid = report(tab.accepted(), "composing Tab was not accepted") && valid;
 
     if (!statusActions.empty()) {
       statusActions.front()->activate(&inputContext);

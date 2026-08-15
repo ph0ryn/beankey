@@ -14,9 +14,9 @@
 
 ## 設計の中心
 
-本プロジェクトの主成果は、固定したAzooKeyKanaKanjiConverterで確認できるかな漢字変換機能をSwiftなしで再実装するエンジンである。機能は依存関係に沿って1個ずつ追加し、最終的にはすべてを実装する。
+本プロジェクトの主成果は、固定したAzooKeyKanaKanjiConverterで確認できるかな漢字変換機能をSwiftなしで再実装するエンジンと、公式azooKey Desktopの日本語入力操作をFcitx5へ写像する入力境界である。
 
-Fcitx5連携、変換デーモン、llama.cpp連携、NixパッケージとNixOS統合は、そのエンジンをNixOS上で利用するための境界として置く。azooKey Desktopのアプリケーション構造を再現することは目的にしない。
+Fcitx5連携、変換デーモン、llama.cpp連携、NixパッケージとNixOS統合は、そのエンジンをNixOS上で利用するための境界として置く。azooKey Desktopのアプリケーション構造や独自GUIは再現せず、観測可能な状態遷移と表示意味だけをFcitx5標準UIで再現する。
 
 変換エンジンについて、原作以外のLinux向け移植は、アーキテクチャ、実装、プロトコル、テストのいずれでも意図的に参照しない。Fcitx5との接続部分だけは、[fcitx5-mozcの固定実装](https://github.com/fcitx/mozc/tree/3f8dea4bdf72c6af200ecdbe3d456871fb1d5e03/src/unix/fcitx5)を基準にする。
 
@@ -27,6 +27,7 @@ Fcitx5連携、変換デーモン、llama.cpp連携、NixパッケージとNixOS
 - 変換エンジンとllama.cppは、Fcitx5とは別のデーモンで動かす。
 - アドオンとデーモンは、Unixドメインソケット上のProtobufで通信する。
 - デーモンへ接続できない場合は、アドオンがNix store pathを指定してserver executableを直接起動し、接続を再試行する。
+- アドオンはFcitx5のキーをプラットフォーム非依存の操作へ正規化し、デーモンは入力中、preview中、候補選択中の状態遷移をセッションごとに所有する。
 - デーモンの起動にsystemd serviceまたはsocket activationを使用しない。
 - Fcitx5側の入力コンテキスト状態、キーconsumed判定、プリエディット、候補および確定結果の反映はfcitx5-mozcに準拠する。
 - Zenzai推論には、`flake.lock`が固定するnixpkgsの`pkgs.llama-cpp`を直接使用する。
@@ -209,6 +210,7 @@ rich candidate、personalization、次入力予測、LM誤入力訂正も最終�
 - 共有可能な辞書とモデルを重複せず保持する
 - Unixドメインソケットを通じて要求を受ける
 - セッション内の入力順序を保って変換コアを呼び出す
+- Desktop準拠の入力状態遷移、候補window状態および予測表示状態をセッションごとに保持する
 - 結果または構造化されたエラーを返す
 - NixOS上でアドオンから直接起動できるデーモンとして動作する
 
@@ -225,7 +227,7 @@ rich candidate、personalization、次入力予測、LM誤入力訂正も最終�
 責任:
 
 - Fcitx5へ入力メソッドを登録する
-- Fcitx5の入力イベントとプロトコル上の操作を橋渡しする
+- Fcitx5のkey symbolとmodifierをプロトコル上の意味的な操作へ正規化する
 - 入力コンテキストとデーモン側セッションを対応付ける
 - 周辺テキストが取得できる場合は、取得可否、本文、カーソル位置をデーモンへ渡す
 - デーモンの結果をFcitx5のプリエディットと標準候補UIへ反映する
@@ -253,11 +255,11 @@ daemonへの接続または要求が失敗した場合は、対応するセッ�
 - 文字入力、削除、カーソル移動、候補選択、確定などの操作
 - 入力方式と変換オプション
 - left/right contextと、その取得可否
-- プリエディット、カーソル、候補列、入力消費範囲、確定文字列
+- 入力状態、候補window状態、プリエディットの選択範囲、カーソル、注釈付き候補列、独立した予測、入力消費範囲、確定文字列
 - 正常動作と障害を診断するための任意trace
 - 縮退およびエラー状態
 
-各frameはvarint length-delimited Protobufとし、1 MiBを上限にする。envelopeは`protocol_version`、`request_id`、`session_id`と、要求または応答の`oneof payload`を持つ。要求payloadはsessionの開始・reset・終了、key event、candidate selection、pagingおよび確定を表し、応答payloadはconsumed、プリエディット、候補、確定文字列、状態更新または構造化errorを表す。未知のversion、不正なpayloadおよびsize超過は接続単位のprotocol errorとしてFail Fastで扱う。原作のSwift型またはMozc固有protocolをそのままwire formatへしてはならない。
+各frameはvarint length-delimited Protobufとし、1 MiBを上限にする。envelopeは`protocol_version`、`request_id`、`session_id`と、要求または応答の`oneof payload`を持つ。key eventはX11/Fcitx固有key symbolではなく、入力、削除、確定、navigation、変換などの意味的な操作を表す。応答payloadはconsumed、入力状態、プリエディット、候補window、注釈付き候補、独立した予測、確定文字列または構造化errorを表す。未知のversion、不正なpayloadおよびsize超過は接続単位のprotocol errorとしてFail Fastで扱う。原作のSwift型またはMozc固有protocolをそのままwire formatへしてはならない。
 
 ### NixパッケージとNixOS統合
 
