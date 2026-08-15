@@ -1,14 +1,79 @@
-# beankey（仮称）
+# beankey for fcitx5 on NixOS
 
-azooKey Desktopの操作感をNixOSとFcitx5で再現する、RustおよびC++製の日本語入力エンジン
+beankeyは、[azooKey Desktop](https://github.com/azooKey/azooKey-Desktop)の日本語入力体験をNixOS上のFcitx5向けにRustとC++で再実装した日本語入力エンジンです。
 
-現在は開発中で、NixOSとFcitx5上で互換性を検証中
+ニューラルかな漢字変換システムには、[zenz-v3.2-small-gguf](https://huggingface.co/Miwa-Keita/zenz-v3.2-small-gguf)を使用します。
 
-使用モデル: [Miwa-Keita/zenz-v3.2-small-gguf](https://huggingface.co/Miwa-Keita/zenz-v3.2-small-gguf)
+> [!note]
+> 現在は実験的な段階です。設定や内部データ形式は、今後予告なく変わる可能性があります。
+
+## 主な機能
+
+- ローマ字、AZIK、かな入力、カスタム入力テーブル
+- 通常変換、ライブ変換、文節単位の確定、再変換
+- Zenzaiによる文脈を考慮した候補評価
+- 日本語、英語、ギリシャ語の入力中予測
+- 学習、ユーザー辞書、入力訂正
+- Fcitx5標準UIによるプリエディットと候補表示
+- NixOS moduleによる宣言的な導入と設定
+
+azooKey DesktopのAI変換、UI、独自候補ウィンドウは実装しません。
+
+### azooKey Desktopとの違い
+
+beankeyは、AzooKeyKanaKanjiConverterのかな漢字変換機能と、azooKey Desktopの日本語入力操作を参照しています。ただし、azooKey Desktopそのものを移植するものではありません。
+
+次の機能は対象外です。
+
+- Control+SによるAI置換候補や続きの提案
+- 選択テキストへ指示を与えるAI変換
+- OpenAI APIやApple Foundation Modelsとの通信
+- macOS固有の設定画面
+- 独自の候補ウィンドウ
+- Swift APIとのソース互換性またはABI互換性
+
+候補表示にはFcitx5の標準UIを使用します。変換候補、内部trace、prompt、token、logitが固定原作と完全に一致するかの厳密な適合検証は、まだ行っていません。
+
+## 動作環境
+
+動作確認済みの環境は、`x86_64-linux`、NixOS 26.11、Fcitx5 5.1.21、X11です。
+Wayland、`aarch64-linux`、NixOS以外のLinuxディストリビューションでは、まだ実環境で確認していません。
+推論には、`flake.lock`でnixpkgsのllama.cpp `b10273`を使用します。
+
+## インストール
+
+NixOS flakeへbeankeyを追加し、NixOS moduleを読み込みます。
+
+```nix
+{
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+
+    beankey = {
+      url = "github:ph0ryn/beankey";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+  };
+
+  outputs =
+    { beankey, nixpkgs, ... }:
+    {
+      nixosConfigurations.my-host = nixpkgs.lib.nixosSystem {
+        system = "x86_64-linux";
+        modules = [
+          beankey.nixosModules.default
+          {
+            programs.beankey.enable = true;
+          }
+        ];
+      };
+    };
+}
+```
+
+Switch後にFcitx5を再起動し、Fcitx5の入力メソッド設定から`beankey`を追加してください。
 
 ## 設定
-
-flakeの`nixosModules.default`をNixOS構成へ追加したうえで、`programs.beankey`を設定
 
 設定例
 
@@ -18,10 +83,15 @@ programs.beankey = {
   useBeankeyTheme = true;
 
   conversion = {
-    typeBackslash = false;
+    inputStyle = "roman_to_kana";
+    typeBackslash = true;
     typeHalfSpace = true;
-    optionDirectFullWidthInput = false;
     punctuationStyle = "kuten_and_toten";
+  };
+
+  learning = {
+    mode = "input_and_output";
+    maxCount = 65536;
   };
 
   zenz = {
@@ -33,75 +103,41 @@ programs.beankey = {
 };
 ```
 
-### 変換 (`conversion`)
+詳細は[configuration.md](docs/configuration.md)を参照してください。
 
-| オプション | 初期値 | 説明 |
-| --- | --- | --- |
-| `inputStyle` | `"roman_to_kana"` | 入力方式（`"direct"`、`"roman_to_kana"`、`"azik"`、`"kana_jis"`、`"kana_us"`、`"custom"`から選択） |
-| `customInputTable` | `null` | `inputStyle = "custom"`で使う登録済み入力テーブル名 |
-| `keyboardLanguage` | `"japanese"` | 外国語補完に使うキーボード言語（`"none"`、`"japanese"`、`"english_us"`、`"greek"`から選択） |
-| `candidateCount` | `10` | 一度に要求する変換候補数 |
-| `japanesePrediction` | `"disabled"` | 日本語予測の動作（`"automatic"`、`"manual"`、`"disabled"`から選択） |
-| `foreignPrediction` | `"disabled"` | 英語・ギリシャ語予測の動作（`"automatic"`、`"manual"`、`"disabled"`から選択） |
-| `fullWidthRoman` | `true` | 全角英数候補の生成 |
-| `halfWidthKana` | `false` | 半角カナ候補の生成 |
-| `typography` | `false` | タイポグラフィ候補の生成 |
-| `typoCorrection` | `"automatic"` | 辞書による入力訂正（`"enabled"`、`"automatic"`、`"disabled"`から選択） |
-| `liveConversion` | `true` | 入力中の最良完全一致候補をプリエディットへ表示 |
-| `typeBackslash` | `false` | `true`で円記号キーから`¥`の代わりに`\`を入力（Alt押下中は結果を反転） |
-| `typeHalfSpace` | `false` | `true`でSpaceを半角、Shift+Spaceを全角に設定（`false`では逆） |
-| `optionDirectFullWidthInput` | `false` | `true`で変換中でないときにAltまたはShift+Altから英数字・記号を直接全角入力 |
-| `punctuationStyle` | `"kuten_and_toten"` | コンマキーとピリオドキーの句読点の組み合わせ（Alt押下中は和文・欧文の記号を反転） |
-| `userDictionary` | `null` | JSONユーザー辞書の絶対パス |
-| `userDictionaryDirectory` | `null` | azooKey形式ユーザー辞書ディレクトリの絶対パス |
-| `customInputTables` | `{ }` | 入力テーブル名とカスタムJSONファイルの対応 |
+## 基本操作
 
-`punctuationStyle`で指定可能な値
+| キー | 動作 |
+| --- | --- |
+| `Space` / `↓` | 変換を開始、または次の候補へ移動 |
+| `Shift+Space` / `↑` | 前の候補へ移動 |
+| `Enter` | 入力または選択中の範囲を確定 |
+| `Escape` | 候補選択を戻す。入力中の文字列は保持 |
+| `Tab` | 表示中の予測を受け入れる |
+| `1`から`9` | 表示中の候補を番号で選択 |
+| `F6` | ひらがなへ変換 |
+| `F7` | カタカナへ変換 |
+| `F8` | 半角カナへ変換 |
+| `F9` | 全角英数へ変換 |
+| `F10` | 半角英数へ変換 |
+| `Ctrl+Shift+U` | Unicodeコードポイント入力を開始 |
+| `Ctrl+Backspace` / `Ctrl+Delete` | 選択中の候補を学習結果から忘却 |
 
-| 値 | コンマキー | ピリオドキー |
-| --- | --- | --- |
-| `"kuten_and_toten"` | `、` | `。` |
-| `"kuten_and_comma"` | `，` | `。` |
-| `"period_and_toten"` | `、` | `．` |
-| `"period_and_comma"` | `，` | `．` |
+## ライセンス
 
-### 学習 (`learning`)
+MIT
 
-| オプション | 初期値 | 説明 |
-| --- | --- | --- |
-| `mode` | `"input_and_output"` | 学習データの扱い（`"input_and_output"`は読み書き、`"only_output"`は読み取りのみ、`"nothing"`は無効） |
-| `maxCount` | `65536` | 永続化する学習レコード数の上限 |
+### 参照実装
 
-### Zenzai推論 (`zenz`)
+beankeyは、次の実装を設計と動作の基準として参照しています。
 
-| オプション | 初期値 | 説明 |
-| --- | --- | --- |
-| `inferenceLimit` | `5` | 推論上限 |
-| `profile` | `null` | 変換プロフィール |
-| `topic` | `null` | 話題/分野 |
-| `style` | `null` | 文体 |
-| `preference` | `null` | 表記の優先 |
-| `richCandidates` | `false` | 詳細候補を要求 |
-| `predictiveInput` | `false` | 次入力予測を有効化 |
-| `enableAlignmentSeparator` | `true` | プロンプトへアラインメント区切りを追加 |
-| `personalization` | `null` | EfficientNGramによる個人化設定（`baseNgram`、`personalNgram`、`alpha`を指定） |
+- [AzooKeyKanaKanjiConverter](https://github.com/azooKey/AzooKeyKanaKanjiConverter/tree/93766c46e31fa6a18b7ced49dab31337780f6f45): かな漢字変換とZenzai
+- [azooKey Desktop](https://github.com/azooKey/azooKey-Desktop/tree/3ae5a4651c329d48fee9b9ec7ac1bcd60b940a12): 日本語入力の操作と表示
+- [fcitx5-mozc](https://github.com/fcitx/mozc/tree/3f8dea4bdf72c6af200ecdbe3d456871fb1d5e03/src/unix/fcitx5): Fcitx5連携とデーモン起動
 
-### 言語モデル入力訂正 (`lmTypo`)
+### 再配布資産
 
-| オプション | 初期値 | 説明 |
-| --- | --- | --- |
-| `enabled` | `false` | LM入力訂正を有効化 |
-| `languageModel` | `"zenz"` | 使用する言語モデル（`"zenz"`または`"ngram"`から選択） |
-| `ngram` | `null` | `languageModel = "ngram"`で使うEfficientNGram設定（`prefix`、`n`、`discount`を指定） |
-| `beamSize` | `32` | 探索時のビーム幅 |
-| `topK` | `64` | 各ステップで探索するトークン数の上限 |
-| `candidateCount` | `5` | 返す入力訂正候補数 |
-| `maxSteps` | `null` | デコードのステップ数の上限（`null`では自動決定） |
-| `substitutionCost` | `2.0` | 文字置換のチャネルコスト |
-| `deletionCost` | `3.0` | 文字削除のチャネルコスト |
-| `transpositionCost` | `2.0` | 隣接文字入れ替えのチャネルコスト |
-
-## 設計文書
-
-- [仕様書](docs/spec.md)
-- [アーキテクチャ](docs/architecture.md)
+- [azooKey_dictionary_storage](https://github.com/ensan-hcl/azooKey_dictionary_storage/tree/4d418525b090cf49c219819d05a7e3cc2a4346eb): デフォルト辞書
+- [azooKey_emoji_dictionary_storage](https://github.com/ensan-hcl/azooKey_emoji_dictionary_storage/tree/67b822603391b01238d7b80b8b61b63f966cf357): 絵文字辞書
+- [gpt2-small-japanese-char](https://huggingface.co/ku-nlp/gpt2-small-japanese-char): tokenizer
+- [zenz-v3.2-small-gguf](https://huggingface.co/Miwa-Keita/zenz-v3.2-small-gguf/tree/c67e03e07d215c869f591b274c1631170d3e11fe): Zenzaiモデル
