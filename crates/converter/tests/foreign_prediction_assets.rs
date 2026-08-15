@@ -39,12 +39,13 @@ fn completes_english_and_greek_with_the_pinned_hunspell_dictionaries() {
             },
         )
         .unwrap();
-    assert_eq!(english_result.english_prediction_results[0].text, "hel");
-    assert!(
+    assert_eq!(
         english_result
             .english_prediction_results
             .iter()
-            .any(|candidate| { candidate.text.len() > 3 && candidate.text.starts_with("hel") })
+            .map(|candidate| candidate.text.as_str())
+            .collect::<Vec<_>>(),
+        ["hel", "hell", "held", "helm", "help"]
     );
 
     let mut greek = ConversionSession::new();
