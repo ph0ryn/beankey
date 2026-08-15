@@ -171,7 +171,8 @@ int main() {
       ResetLearning,
       Typo,
       SelectCandidate,
-      SelectTypo
+      SelectTypo,
+      InvalidResponse
     };
     const auto addCandidates = [](beankey::v1::StateResponse *state) {
       for (int index = 0; index < 10; ++index) {
@@ -205,6 +206,8 @@ int main() {
                  request.select_candidate().index() == 0;
         case ExpectedRequest::SelectTypo:
           return request.has_select_typo_correction();
+        case ExpectedRequest::InvalidResponse:
+          return request.has_key_event();
         }
         return false;
       }();
@@ -216,6 +219,9 @@ int main() {
       response.set_protocol_version(request.protocol_version());
       response.set_request_id(request.request_id());
       response.set_session_id(request.session_id());
+      if (expected == ExpectedRequest::InvalidResponse) {
+        response.set_request_id(request.request_id() + 1);
+      }
       if (expected == ExpectedRequest::Typo) {
         auto *candidate =
             response.mutable_typo_correction_response()->add_candidates();
@@ -297,6 +303,7 @@ int main() {
     serverValid = exchange(ExpectedRequest::SelectCandidate) && serverValid;
     serverValid = exchange(ExpectedRequest::Key) && serverValid;
     serverValid = exchange(ExpectedRequest::ResetLearning) && serverValid;
+    serverValid = exchange(ExpectedRequest::InvalidResponse) && serverValid;
     close(connection);
     close(listener);
   });
@@ -431,10 +438,9 @@ int main() {
                    "sliding candidate window has the wrong size") &&
             valid;
     if (secondPage && secondPage->size() == 9) {
-      valid =
-          report(secondPage->candidate(0).text().toString() == "司会",
-                 "unsupported Page Down changed the first candidate") &&
-          valid;
+      valid = report(secondPage->candidate(0).text().toString() == "司会",
+                     "unsupported Page Down changed the first candidate") &&
+              valid;
       valid =
           report(secondPage->candidate(8).text().toString() == "Candidate 9",
                  "unsupported Page Down changed the last candidate") &&
@@ -480,6 +486,18 @@ int main() {
     if (!statusActions.empty()) {
       statusActions.front()->activate(&inputContext);
     }
+
+    fcitx::KeyEvent invalidResponse(&inputContext, fcitx::Key(FcitxKey_b));
+    engine.keyEvent(entry, invalidResponse);
+    valid = report(!invalidResponse.accepted(),
+                   "a mismatched daemon response consumed the key") &&
+            valid;
+    valid = report(inputContext.inputPanel().clientPreedit().empty(),
+                   "a mismatched daemon response left stale preedit") &&
+            valid;
+    valid = report(inputContext.inputPanel().candidateList() == nullptr,
+                   "a mismatched daemon response left stale candidates") &&
+            valid;
   }
 
   server.join();

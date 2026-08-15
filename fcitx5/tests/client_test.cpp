@@ -58,9 +58,8 @@ std::string readFrame(int socket) {
   return {};
 }
 
-void writeFrame(int socket, const std::string &payload) {
+void writeLength(int socket, std::uint32_t size) {
   std::array<std::uint8_t, 5> prefix{};
-  auto size = static_cast<std::uint32_t>(payload.size());
   std::size_t count = 0;
   do {
     auto byte = static_cast<std::uint8_t>(size & 0x7fU);
@@ -71,6 +70,10 @@ void writeFrame(int socket, const std::string &payload) {
     prefix[count++] = byte;
   } while (size != 0);
   assert(writeAll(socket, prefix.data(), count));
+}
+
+void writeFrame(int socket, const std::string &payload) {
+  writeLength(socket, static_cast<std::uint32_t>(payload.size()));
   assert(writeAll(socket, payload.data(), payload.size()));
 }
 
@@ -130,6 +133,50 @@ int main() {
   server.join();
   client.disconnect();
   assert(unlink(socketPath.c_str()) == 0);
+
+  const int oversizedListener = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+  assert(oversizedListener >= 0);
+  assert(bind(oversizedListener, reinterpret_cast<const sockaddr *>(&address),
+              sizeof(address)) == 0);
+  assert(listen(oversizedListener, 1) == 0);
+  std::thread oversizedServer([oversizedListener] {
+    const int connection =
+        accept4(oversizedListener, nullptr, nullptr, SOCK_CLOEXEC);
+    assert(connection >= 0);
+    assert(!readFrame(connection).empty());
+    writeLength(connection, static_cast<std::uint32_t>(
+                                beankey::Client::kMaximumMessageSize + 1));
+    close(connection);
+    close(oversizedListener);
+  });
+  beankey::Client oversized(socketPath);
+  assert(oversized.ensureConnected([] {}, std::chrono::milliseconds(500)));
+  assert(!oversized.request(request, std::chrono::milliseconds(500)));
+  assert(!oversized.connected());
+  oversizedServer.join();
+  assert(unlink(socketPath.c_str()) == 0);
+
+  const int malformedListener = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+  assert(malformedListener >= 0);
+  assert(bind(malformedListener, reinterpret_cast<const sockaddr *>(&address),
+              sizeof(address)) == 0);
+  assert(listen(malformedListener, 1) == 0);
+  std::thread malformedServer([malformedListener] {
+    const int connection =
+        accept4(malformedListener, nullptr, nullptr, SOCK_CLOEXEC);
+    assert(connection >= 0);
+    assert(!readFrame(connection).empty());
+    writeFrame(connection, std::string(1, static_cast<char>(0xff)));
+    close(connection);
+    close(malformedListener);
+  });
+  beankey::Client malformed(socketPath);
+  assert(malformed.ensureConnected([] {}, std::chrono::milliseconds(500)));
+  assert(!malformed.request(request, std::chrono::milliseconds(500)));
+  assert(!malformed.connected());
+  malformedServer.join();
+  assert(unlink(socketPath.c_str()) == 0);
+
   assert(rmdir(directory) == 0);
 
   bool missingLaunch = false;
