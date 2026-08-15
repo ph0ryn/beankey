@@ -50,6 +50,16 @@ fn start_roman_session(engine: &mut Engine, request_id: u64) {
     )));
 }
 
+fn key_event(key_sym: u32, text: &str) -> protocol::KeyEvent {
+    protocol::KeyEvent {
+        key_sym,
+        text: text.into(),
+        input: text.into(),
+        intention: text.into(),
+        ..Default::default()
+    }
+}
+
 #[test]
 fn does_not_turn_control_key_text_into_composition() {
     let mut engine = Engine::open(dictionary_root()).unwrap();
@@ -86,6 +96,92 @@ fn does_not_turn_control_key_text_into_composition() {
             Payload::ResetSession(protocol::ResetSession {}),
         )));
         assert!(reset.reset);
+    }
+}
+
+#[test]
+fn edits_active_composition_with_backspace_and_delete() {
+    let mut engine = Engine::open(dictionary_root()).unwrap();
+    start_roman_session(&mut engine, 1);
+
+    let composing = response(engine.handle(envelope(2, Payload::KeyEvent(key_event(0, "kana")))));
+    assert_eq!(composing.preedit, "かな");
+
+    let backspace =
+        response(engine.handle(envelope(3, Payload::KeyEvent(key_event(0xff08, "\u{8}")))));
+    assert!(backspace.consumed);
+    assert_eq!(backspace.preedit, "か");
+    assert!(backspace.commit.is_empty());
+
+    response(engine.handle(envelope(
+        4,
+        Payload::ResetSession(protocol::ResetSession {}),
+    )));
+    response(engine.handle(envelope(5, Payload::KeyEvent(key_event(0, "kana")))));
+    let moved = response(engine.handle(envelope(6, Payload::KeyEvent(key_event(0xff51, "")))));
+    assert_eq!(moved.preedit_cursor, 1);
+
+    let delete =
+        response(engine.handle(envelope(7, Payload::KeyEvent(key_event(0xffff, "\u{7f}")))));
+    assert!(delete.consumed);
+    assert_eq!(delete.preedit, "か");
+    assert_eq!(delete.preedit_cursor, 1);
+    assert!(delete.commit.is_empty());
+}
+
+#[test]
+fn commits_active_composition_with_return_and_keypad_enter() {
+    for (name, key_sym) in [("Return", 0xff0d), ("KP_Enter", 0xff8d)] {
+        let mut engine = Engine::open(dictionary_root()).unwrap();
+        start_roman_session(&mut engine, 1);
+        response(engine.handle(envelope(2, Payload::KeyEvent(key_event(0, "shikai")))));
+
+        let committed =
+            response(engine.handle(envelope(3, Payload::KeyEvent(key_event(key_sym, "\r")))));
+        assert!(committed.consumed, "{name} did not commit the composition");
+        assert!(
+            !committed.commit.is_empty(),
+            "{name} returned an empty commit"
+        );
+        assert!(
+            !committed.commit.chars().any(char::is_control),
+            "{name} committed control text"
+        );
+        assert!(committed.preedit.is_empty());
+    }
+}
+
+#[test]
+fn escape_cancels_active_composition() {
+    let mut engine = Engine::open(dictionary_root()).unwrap();
+    start_roman_session(&mut engine, 1);
+    response(engine.handle(envelope(2, Payload::KeyEvent(key_event(0, "kana")))));
+
+    let escaped =
+        response(engine.handle(envelope(3, Payload::KeyEvent(key_event(0xff1b, "\u{1b}")))));
+    assert!(escaped.consumed);
+    assert!(escaped.reset);
+    assert!(escaped.preedit.is_empty());
+    assert!(escaped.candidates.is_empty());
+    assert!(escaped.commit.is_empty());
+}
+
+#[test]
+fn returns_tab_without_mutating_active_composition() {
+    for (name, key_sym) in [("Tab", 0xff09), ("ISO_Left_Tab", 0xfe20)] {
+        let mut engine = Engine::open(dictionary_root()).unwrap();
+        start_roman_session(&mut engine, 1);
+        let composing =
+            response(engine.handle(envelope(2, Payload::KeyEvent(key_event(0, "kana")))));
+
+        let tab = response(engine.handle(envelope(3, Payload::KeyEvent(key_event(key_sym, "\t")))));
+        assert!(!tab.consumed, "{name} must be returned to Fcitx5");
+        assert_eq!(tab.preedit, composing.preedit, "{name} changed preedit");
+        assert_eq!(
+            tab.preedit_cursor, composing.preedit_cursor,
+            "{name} moved the preedit cursor"
+        );
+        assert!(tab.commit.is_empty(), "{name} committed text");
     }
 }
 
@@ -131,27 +227,26 @@ fn returns_enter_after_committing_a_candidate() {
 
 #[test]
 fn does_not_persist_control_key_text_in_learning_memory() {
-    let state = TempDir::new().unwrap();
-    let mut engine = Engine::open_with_learning(dictionary_root(), state.path()).unwrap();
-    start_roman_session(&mut engine, 1);
+    for (name, key_sym, text) in [
+        ("BackSpace", 0xff08, "\u{8}"),
+        ("Return", 0xff0d, "\r"),
+        ("KP_Enter", 0xff8d, "\r"),
+        ("Escape", 0xff1b, "\u{1b}"),
+        ("Tab", 0xff09, "\t"),
+        ("ISO_Left_Tab", 0xfe20, "\t"),
+        ("Delete", 0xffff, "\u{7f}"),
+    ] {
+        let state = TempDir::new().unwrap();
+        let mut engine = Engine::open_with_learning(dictionary_root(), state.path()).unwrap();
+        start_roman_session(&mut engine, 1);
+        response(engine.handle(envelope(2, Payload::KeyEvent(key_event(key_sym, text)))));
+        response(engine.handle(envelope(3, Payload::KeyEvent(key_event(0xff0d, "")))));
 
-    for request_id in 2..=3 {
-        response(engine.handle(envelope(
-            request_id,
-            Payload::KeyEvent(protocol::KeyEvent {
-                key_sym: 0xff0d,
-                text: "\r".into(),
-                input: "\r".into(),
-                intention: "\r".into(),
-                ..Default::default()
-            }),
-        )));
+        assert!(
+            !state.path().join("memory.bin").exists(),
+            "{name} control text reached persistent learning memory"
+        );
     }
-
-    assert!(
-        !state.path().join("memory.bin").exists(),
-        "control key text reached persistent learning memory"
-    );
 }
 
 #[test]

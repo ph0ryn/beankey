@@ -668,6 +668,41 @@ mod tests {
     }
 
     #[test]
+    fn ignores_control_text_in_existing_learning_memory() {
+        let directory = std::env::temp_dir().join(format!(
+            "beankey-control-learning-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let memory = LearningMemory::open(&directory, LearningMode::InputAndOutput, 128).unwrap();
+        for (word, ruby) in [("正常", "セイジョウ"), ("\r", "\r"), ("語\t", "ゴ\t")] {
+            memory
+                .learn(&Candidate::single(
+                    word.into(),
+                    -12.0,
+                    crate::ComposingCount::Surface(1),
+                    501,
+                    vec![entry(word, ruby)],
+                ))
+                .unwrap();
+        }
+        assert!(memory.commit().unwrap());
+        drop(memory);
+
+        let recovered = LearningMemory::open(&directory, LearningMode::OnlyOutput, 128).unwrap();
+        let entries = recovered.entries().unwrap();
+        fs::remove_dir_all(directory).unwrap();
+
+        assert!(entries.iter().any(|entry| entry.word == "正常"));
+        assert!(entries.iter().all(|entry| {
+            !entry.word.chars().any(char::is_control) && !entry.ruby.chars().any(char::is_control)
+        }));
+    }
+
+    #[test]
     fn learns_only_the_new_part_of_a_post_composition_prediction() {
         let memory = memory(LearningMode::InputAndOutput, Vec::new());
         let base_entry = entry("今日", "キョウ");
