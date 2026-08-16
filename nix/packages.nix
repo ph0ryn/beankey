@@ -75,6 +75,7 @@ in
     pname = "fcitx5-bean-key";
     inherit version;
     src = sourceFor [
+      "Cargo.toml"
       "LICENSE"
       "fcitx5"
       "proto"

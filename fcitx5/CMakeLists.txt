@@ -1,6 +1,12 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(bean-key-fcitx5 VERSION 0.1.0 LANGUAGES CXX)
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/../Cargo.toml" BEAN_KEY_CARGO_TOML)
+string(REGEX MATCH "version = \"([0-9]+\\.[0-9]+\\.[0-9]+)\"" _ "${BEAN_KEY_CARGO_TOML}")
+if(NOT CMAKE_MATCH_1)
+  message(FATAL_ERROR "Could not read the workspace version from Cargo.toml")
+endif()
+
+project(bean-key-fcitx5 VERSION "${CMAKE_MATCH_1}" LANGUAGES CXX)
 
 include(GNUInstallDirs)
 include(CTest)
